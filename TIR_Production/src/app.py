@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-# Module: src.streamlit_app
+# Module: src.app
 # Web UI for coding Technical Issue Report liabilities.
 #
 # Run from the repository root:
-#     streamlit run src/streamlit_app.py
+#     streamlit run src/app.py
 
 import sys
 from pathlib import Path
@@ -25,34 +25,31 @@ import pandas as pd
 import streamlit as st
 
 try:  # modules under src/
-    from src.columns import canonicalize
-    from src.export import DETAIL_FIELDS, filename, heading, to_workbook
+    from src.config import (
+        FEEDBACK_CFG, FEEDBACK_PATH, PRIMARY_TARGET, REQUIRED_COLS, ROOT,
+        TARGETS, TEXT_COLS, heading, target_title,
+    )
+    from src.data import build_text_series, canonicalize, validate_input_dataframe
+    from src.export import DETAIL_FIELDS, filename, to_workbook
     from src.feedback import (
         DEFAULT_SIMILARITY_THRESHOLD, append_feedback, latest_corrections, load_feedback,
     )
-    from src.inference import CONFIG, TARGETS, classify, load_bundle, target_title
-    from src.paths import DATA_DIR, ROOT
-    from src.utils import build_text_series, validate_input_dataframe
+    from src.inference import classify, load_bundle
 except ImportError:  # flat layout, modules at the repository root
-    from columns import canonicalize
-    from export import DETAIL_FIELDS, filename, heading, to_workbook
+    from config import (
+        FEEDBACK_CFG, FEEDBACK_PATH, PRIMARY_TARGET, REQUIRED_COLS, ROOT,
+        TARGETS, TEXT_COLS, heading, target_title,
+    )
+    from data import build_text_series, canonicalize, validate_input_dataframe
+    from export import DETAIL_FIELDS, filename, to_workbook
     from feedback import (
         DEFAULT_SIMILARITY_THRESHOLD, append_feedback, latest_corrections, load_feedback,
     )
-    from inference import CONFIG, TARGETS, classify, load_bundle, target_title
-    from paths import DATA_DIR, ROOT
-    from utils import build_text_series, validate_input_dataframe
+    from inference import classify, load_bundle
 
 
-ALIASES = CONFIG.get("column_aliases", {})
-REQUIRED_COLS = CONFIG.get("required_columns", ["description_1"])
-TEXT_COLS = CONFIG.get("text_columns", REQUIRED_COLS)
-PRIMARY_TARGET = CONFIG.get("primary_target", "process_cat")
-
-FEEDBACK_CFG = CONFIG.get("feedback", {})
 FEEDBACK_ENABLED = FEEDBACK_CFG.get("enabled", False)
 SIMILARITY_THRESHOLD = FEEDBACK_CFG.get("similarity_threshold", DEFAULT_SIMILARITY_THRESHOLD)
-FEEDBACK_PATH = DATA_DIR / "feedback.csv"
 
 # The parent every child target hangs from; confirming it is the single
 # largest accuracy lever the UI has.
@@ -264,7 +261,7 @@ def render_batch(bundle: dict) -> None:
         return
 
     raw = pd.read_csv(upload) if upload.name.lower().endswith(".csv") else pd.read_excel(upload)
-    df = canonicalize(raw, ALIASES)
+    df = canonicalize(raw)
 
     try:
         validate_input_dataframe(df, REQUIRED_COLS)

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-# Module: src.ensemble
+# Module: src.classify
 # Classifies a raw QPS export from the command line and reports accuracy
 # wherever the file carries the true categories.
 
@@ -14,20 +14,21 @@ import pandas as pd
 from sklearn.metrics import accuracy_score, classification_report, f1_score
 
 try:  # modules under src/
-    from src.columns import canonicalize
-    from src.inference import CONFIG, TARGETS, classify, load_bundle, target_title
-    from src.paths import DATA_DIR, MODEL_DIR
-    from src.utils import build_text_series, normalize_categories, validate_input_dataframe
+    from src.config import (
+        CONFIG, DATA_DIR, MODEL_DIR, REQUIRED_COLS, TARGETS, TEXT_COLS, target_title,
+    )
+    from src.data import (
+        build_text_series, canonicalize, normalize_categories, validate_input_dataframe,
+    )
+    from src.inference import classify, load_bundle
 except ImportError:  # flat layout, modules at the repository root
-    from columns import canonicalize
-    from inference import CONFIG, TARGETS, classify, load_bundle, target_title
-    from paths import DATA_DIR, MODEL_DIR
-    from utils import build_text_series, normalize_categories, validate_input_dataframe
-
-
-ALIASES = CONFIG.get("column_aliases", {})
-REQUIRED_COLS = CONFIG.get("required_columns", ["description_1"])
-TEXT_COLS = CONFIG.get("text_columns", REQUIRED_COLS)
+    from config import (
+        CONFIG, DATA_DIR, MODEL_DIR, REQUIRED_COLS, TARGETS, TEXT_COLS, target_title,
+    )
+    from data import (
+        build_text_series, canonicalize, normalize_categories, validate_input_dataframe,
+    )
+    from inference import classify, load_bundle
 
 
 # Reports how well one target did against the file's own labels.
@@ -79,7 +80,7 @@ def main():
 
     fp = Path(args.raw_csv)
     raw = pd.read_csv(fp) if fp.suffix.lower() == ".csv" else pd.read_excel(fp)
-    df = canonicalize(raw, ALIASES)
+    df = canonicalize(raw)
 
     validate_input_dataframe(df, REQUIRED_COLS)
     df["text"] = build_text_series(df, TEXT_COLS)

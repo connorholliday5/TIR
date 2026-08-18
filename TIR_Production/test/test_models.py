@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-# Module: test.test_utils
+# Module: test.test_models
 # Covers text assembly and the ensemble arithmetic behind the number shown to
 # a coder as "confidence".
 
@@ -9,9 +9,9 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from src.utils import (
-    build_text_series, clean_text, combine_ensemble_scores,
-    ensemble_score_matrix, is_blank_text, top_k_from_scores,
+from src.data import build_text_series, clean_text, is_blank_text
+from src.models import (
+    combine_ensemble_scores, ensemble_score_matrix, top_k_from_scores,
 )
 
 
@@ -87,3 +87,64 @@ def test_top_k_is_ordered_best_first():
 def test_top_k_larger_than_label_space():
     ids, _ = top_k_from_scores(np.array([[0.4, 0.6]]), 5)
     assert ids.shape == (1, 2)
+
+
+# -- correction reuse --------------------------------------------------------
+#
+# Corrections are reapplied to near-duplicate wordings using the classifiers'
+# own TF-IDF features.  The threshold has to be loose enough that an edit which
+# leaves a TIR the same TIR still matches, and tight enough that a genuine
+# rewording goes back to the model.
+
+import pytest as _pytest
+from sklearn.feature_extraction.text import TfidfVectorizer
+
+from src.feedback import CorrectionIndex
+
+
+@_pytest.fixture(scope="module")
+def index():
+    corpus = [
+        "cracked weld on pipe hanger", "cable damaged inside panel",
+        "missing label on valve body", "loose bolt on foundation",
+        "paint missing from bracket", "hanger fit not like drawing",
+    ]
+    word = TfidfVectorizer(ngram_range=(1, 2)).fit(corpus)
+    char = TfidfVectorizer(analyzer="char", ngram_range=(3, 5)).fit(corpus)
+    return CorrectionIndex(
+        ["cracked weld on pipe hanger"], ["HA HANGER"], word, char,
+    )
+
+
+# An exact repeat is answered with full confidence.
+def test_exact_match_is_certain(index):
+    assert index.lookup("cracked weld on pipe hanger") == ("HA HANGER", 1.0)
+
+
+# Whitespace and case are not meaningful differences.
+def test_match_survives_reformatting(index):
+    label, _ = index.lookup("  Cracked   WELD on pipe hanger ")
+    assert label == "HA HANGER"
+
+
+# A wording nothing was corrected for is left to the model.
+def test_unrelated_text_does_not_match(index):
+    assert index.lookup("missing label on valve body") == (None, 0.0)
+
+
+# A blank lookup must not be anyone's nearest neighbour.
+def test_blank_lookup_does_not_match(index):
+    assert index.lookup("") == (None, 0.0)
+
+
+# An empty index answers nothing rather than failing.
+def test_empty_index_is_safe():
+    assert CorrectionIndex([], []).lookup("anything") == (None, 0.0)
+    assert len(CorrectionIndex([], [])) == 0
+
+
+# A threshold above 1.0 is the documented way to accept exact matches only.
+def test_threshold_above_one_allows_exact_only():
+    idx = CorrectionIndex(["bolt loose"], ["FA FASTENER"], threshold=1.5)
+    assert idx.lookup("bolt loose")[0] == "FA FASTENER"
+    assert idx.lookup("bolt is loose") == (None, 0.0)

@@ -23,13 +23,21 @@ from sklearn.metrics import f1_score
 from sklearn.svm import LinearSVC
 
 try:  # modules under src/
+    from src.config import (
+        CONFIG, CONFIG_PATH, DATA_DIR, FEEDBACK_PATH, GATE, HIERARCHY_PATH,
+        MODEL_DIR, PROC_DIR, ROOT, SEED, TARGETS, label_map_path,
+    )
+    from src.data import clean_text
     from src.feedback import feedback_training_rows
-    from src.paths import CONFIG_PATH, DATA_DIR, MODEL_DIR, ROOT
-    from src.utils import clean_text, expand_proba, hash_file, hstack_csr
+    from src.models import hstack_csr, write_hashes
 except ImportError:  # flat layout, modules at the repository root
+    from config import (
+        CONFIG, CONFIG_PATH, DATA_DIR, FEEDBACK_PATH, GATE, HIERARCHY_PATH,
+        MODEL_DIR, PROC_DIR, ROOT, SEED, TARGETS, label_map_path,
+    )
+    from data import clean_text
     from feedback import feedback_training_rows
-    from paths import CONFIG_PATH, DATA_DIR, MODEL_DIR, ROOT
-    from utils import clean_text, expand_proba, hash_file, hstack_csr
+    from models import hstack_csr, write_hashes
 
 
 # Configures logging for the training pipeline.
@@ -45,15 +53,6 @@ def info(msg):
     print(msg, flush=True)
     logging.info(msg)
 
-
-# Loads configuration values and prepares directories.
-CONFIG = json.loads(CONFIG_PATH.read_text())
-SEED = CONFIG.get("random_seed", 42)
-TARGETS: dict = CONFIG.get("targets", {})
-
-PROC_DIR = DATA_DIR / "processed"
-FEEDBACK_FILE = DATA_DIR / "feedback.csv"
-HIERARCHY_PATH = DATA_DIR / "hierarchy.json"
 
 # Vectorizers are shared by every target; only the classifiers differ, so
 # these live at the root of models/ and each target gets a subfolder.
@@ -76,7 +75,6 @@ MIN_PARENT_ROWS = 10
 # win eventually" but "does it beat a calibrated linear SVM at a comparable
 # cost", which is the question that decides what ships.  Raise these to give
 # the challengers a longer run.
-GATE = CONFIG.get("gate", {})
 # Screening the challenger families is off by default.  Measured on a held-out
 # split, the calibrated linear SVM matched the full three-model ensemble, while
 # boosting over a 180,000-column TF-IDF matrix took longer than everything else
@@ -114,12 +112,6 @@ def clean_old_models():
             + ", ".join(failed)
             + ". Remove them by hand, or stop whatever is holding them open."
         )
-
-
-# Writes a SHA-256 digest beside each artifact.
-def write_hashes(paths):
-    for p in paths:
-        (p.with_suffix(p.suffix + ".sha256")).write_text(hash_file(p))
 
 
 # Fits a calibrated linear SVM over the rows it is given.
@@ -284,7 +276,7 @@ def save_models(out_dir: Path, models: dict, report: dict) -> None:
     # Equal weights across whatever survived: the members are now all
     # calibrated probability outputs on the same scale, and there is no
     # held-out evidence for preferring one over another beyond the gate that
-    # already admitted them.  src.tune_weights can refine this.
+    # already admitted them.
     weights = {name: round(1.0 / len(models), 4) for name in models}
     (out_dir / "ensemble.json").write_text(
         json.dumps({"weights": weights, "validation_macro_f1": report}, indent=4)
@@ -412,7 +404,7 @@ def main():
         df["text"] = df["text"].astype(str).apply(clean_text)
 
     label_maps = {
-        t: json.loads((DATA_DIR / f"label_map_{t}.json").read_text()) for t in TARGETS
+        t: json.loads(label_map_path(t).read_text()) for t in TARGETS
     }
     hierarchy = json.loads(HIERARCHY_PATH.read_text()) if HIERARCHY_PATH.is_file() else {}
 
@@ -422,7 +414,7 @@ def main():
     # honest.  Each correction names the target it applies to.
     for target, label_map in label_maps.items():
         name2id = {v["name"]: int(k) for k, v in label_map.items()}
-        corrections = feedback_training_rows(FEEDBACK_FILE, name2id, target=target)
+        corrections = feedback_training_rows(FEEDBACK_PATH, name2id, target=target)
 
         if corrections.empty:
             info(f"No reviewer corrections to fold into {target}.")

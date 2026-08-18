@@ -7,17 +7,17 @@
 #
 # Corrections made in the web app land in data/feedback.csv and are used twice:
 #
-#   1. Immediately, through CorrectionIndex: a TIR whose text matches one that
-#      has already been corrected is answered with the reviewer's label instead
-#      of the model's, so the same mistake is not repeated while the current
-#      models are in place.
+#   1. Immediately, through CorrectionIndex: a TIR whose wording matches one
+#      that has already been corrected is answered with the reviewer's label
+#      instead of the model's, so the same mistake is not repeated while the
+#      current models are in place.
 #   2. Permanently, by src.train, which folds the corrections into the training
 #      data on the next run so the models themselves improve.
 #
 # Matching is exact on the cleaned text, and otherwise by cosine similarity of
-# the dense embeddings, which catches near-duplicate wordings.  The threshold
-# is deliberately conservative: a wrong override is worse than no override,
-# because it carries a reviewer's authority.
+# the same TF-IDF features the classifiers read.  The threshold is deliberately
+# conservative: a wrong override is worse than no override, because it carries
+# a reviewer's authority.
 
 from datetime import datetime, timezone
 from pathlib import Path
@@ -25,27 +25,43 @@ from typing import List, Optional, Sequence, Tuple, cast
 
 import numpy as np
 import pandas as pd
+from sklearn.preprocessing import normalize
 
-try:  # modules under src/
-    from src.embedding import SubwordHashEmbedder
-    from src.utils import clean_text
-except ImportError:  # flat layout, modules at the repository root
-    from embedding import SubwordHashEmbedder
-    from utils import clean_text
+try:
+    from src.data import clean_text
+    from src.models import build_features
+except ImportError:
+    from data import clean_text
+    from models import build_features
 
 
 FEEDBACK_COLUMNS = ["timestamp", "target", "text", "predicted", "corrected"]
 
 # Cosine similarity required before a stored correction is reused.
 #
-# Calibrated on 5.3M different-category pairs from the sample TIR export: the
-# 99th percentile similarity is 0.23, and 0.88 leaves 14 pairs (0.0003%) able
-# to match across categories.  On the other side, minor edits to a corrected
-# text stay above it — one typo scores 0.94, an inserted word 0.92 — while a
-# genuine rewording drops to 0.69 and is correctly left to the model.
+# Calibrated from both directions on the held-out split, scored with the same
+# TF-IDF features the models read.
+#
+# Against wrong matches: different-category pairs sit far below it — their 99th
+# percentile similarity is 0.086 — and at 0.80 only 1.9% of the pairs this would
+# match were coded differently by a person.  Much of even that is not a matching
+# failure, since coders gave conflicting categories to 31% of *identical*
+# descriptions.
+#
+# Against missed matches, which is what fixes the threshold: measured on real
+# edits to a stored wording, a typo scores 0.815, a plural 0.857 and an inserted
+# word 0.842, while a reordering drops to 0.610 and a genuine rewording to 0.207.
+# 0.80 therefore reuses a correction through the edits that leave a TIR the same
+# TIR, and leaves anything genuinely reworded to the model.  At 0.90 none of
+# those edits match at all and only an exact repeat is ever answered.
+#
+# The figures are not comparable to the 0.88 that the previous hash-embedding
+# space used — TF-IDF similarity is on a different scale — but the behaviour is:
+# that threshold also caught a typo and an inserted word while rejecting a
+# rewording.
 #
 # Raise it towards 1.0 for stricter matching; 1.0 accepts exact matches only.
-DEFAULT_SIMILARITY_THRESHOLD = 0.88
+DEFAULT_SIMILARITY_THRESHOLD = 0.80
 
 
 # Appends one reviewer correction to the log.
@@ -127,19 +143,25 @@ class CorrectionIndex:
     Args:
         texts: Corrected TIR texts.
         labels: The reviewer's category for each text.
-        embedder: Embedder used to compare near-duplicate wordings; the same
-            one the models were trained with.
+        tfidf_word: The fitted word-level vectorizer from training.
+        tfidf_char: The fitted character-level vectorizer from training.
         threshold: Minimum cosine similarity for a non-exact match.
+
+    Reusing the classifiers' own features means a correction is reapplied on
+    the same notion of similarity the model was trained under, and removes the
+    separate hash-embedding space that previously existed only for this.
     """
 
     def __init__(
         self,
         texts: Sequence[str],
         labels: Sequence[str],
-        embedder: SubwordHashEmbedder,
+        tfidf_word=None,
+        tfidf_char=None,
         threshold: float = DEFAULT_SIMILARITY_THRESHOLD,
     ) -> None:
-        self.embedder = embedder
+        self.tfidf_word = tfidf_word
+        self.tfidf_char = tfidf_char
         self.threshold = float(threshold)
         self.texts: List[str] = [clean_text(t) for t in texts]
         self.labels: List[str] = [str(v) for v in labels]
@@ -148,26 +170,11 @@ class CorrectionIndex:
         # latest_corrections().
         self._exact = {t: v for t, v in zip(self.texts, self.labels)}
 
-        if self.texts and self.threshold <= 1.0:
-            vectors = embedder.embed_many(self.texts)
-            norms = np.linalg.norm(vectors, axis=1, keepdims=True)
-            # A zero-length text embeds to the zero vector; leave it at zero so
-            # it can never be the nearest neighbour of anything.
-            self._unit = np.divide(vectors, norms, out=np.zeros_like(vectors), where=norms > 0)
-        else:
-            self._unit = np.zeros((0, embedder.dim), dtype=np.float32)
-
-    # Builds an index from the correction log on disk.
-    @classmethod
-    def from_file(
-        cls,
-        path: Path,
-        embedder: SubwordHashEmbedder,
-        threshold: float = DEFAULT_SIMILARITY_THRESHOLD,
-    ) -> "CorrectionIndex":
-        """Load `path` and build an index from its most recent corrections."""
-        df = latest_corrections(load_feedback(path))
-        return cls(df["text"].tolist(), df["corrected"].tolist(), embedder, threshold)
+        self._matrix = None
+        if self.texts and tfidf_word is not None and self.threshold <= 1.0:
+            # Rows are unit-normalised once, so a lookup is a single sparse
+            # dot product rather than a similarity computed per candidate.
+            self._matrix = normalize(build_features(self.texts, tfidf_word, tfidf_char))
 
     # Finds the reviewer's answer for a text, if there is one.
     def lookup(self, text: str) -> Tuple[Optional[str], float]:
@@ -181,21 +188,19 @@ class CorrectionIndex:
         if exact is not None:
             return exact, 1.0
 
-        if not len(self._unit) or self.threshold > 1.0:
+        if self._matrix is None or self.threshold > 1.0:
             return None, 0.0
 
-        vec = self.embedder.embed(cleaned)
-        norm = float(np.linalg.norm(vec))
-        if norm == 0.0:
+        vector = normalize(build_features([cleaned], self.tfidf_word, self.tfidf_char))
+        # A text sharing no feature with anything stored embeds to all zeros,
+        # which scores 0 against every row and cannot be anyone's match.
+        similarities = (self._matrix @ vector.T).toarray().ravel()
+        if not len(similarities):
             return None, 0.0
 
-        sims = self._unit @ (vec / norm)
-        best = int(np.argmax(sims))
-        score = float(sims[best])
-
-        if score >= self.threshold:
-            return self.labels[best], score
-        return None, 0.0
+        best = int(np.argmax(similarities))
+        score = float(similarities[best])
+        return (self.labels[best], score) if score >= self.threshold else (None, 0.0)
 
     def __len__(self) -> int:
         return len(self._exact)
@@ -210,15 +215,6 @@ def feedback_training_rows(
     Corrections naming a category that is not in the label map are dropped:
     the map is rebuilt by src.preprocess, and a new category cannot be learned
     without regenerating it.
-
-    Args:
-        path: The feedback CSV.
-        name2id: Category name -> label id for the target being trained.
-        target: Only use corrections for this field; empty means all of them.
-        default_target: Field to attribute corrections logged without one.
-
-    Returns:
-        A DataFrame with `text` and `label` columns (possibly empty).
     """
     df = load_feedback(Path(path))
     if target:

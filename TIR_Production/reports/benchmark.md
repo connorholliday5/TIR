@@ -1,6 +1,6 @@
 # TIR coding benchmark
 
-What the models are worth in coder time. Regenerate with `python -m src.report_benchmark`.
+What the models are worth in coder time. Regenerate with `python -m src.reports benchmark`.
 
 Held-out split: **13,644 rows**, never seen during training.
 

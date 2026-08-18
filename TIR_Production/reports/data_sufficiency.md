@@ -1,6 +1,6 @@
 # TIR data sufficiency
 
-Is the QPS data labelled well enough to train a classifier on? Regenerate with `python -m src.report_data --raw_csv <files>`.
+Is the QPS data labelled well enough to train a classifier on? Regenerate with `python -m src.reports sufficiency --raw_csv <files>`.
 
 ## Files read
 

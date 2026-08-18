@@ -17,43 +17,25 @@ import numpy as np
 import pandas as pd
 
 try:  # modules under src/
-    from src.paths import CONFIG_PATH, DATA_DIR, MODEL_DIR
-    from src.utils import (
-        build_feature_matrix_many, ensemble_score_matrix, expand_proba,
-        is_blank_text, top_k_from_scores, verify_model_hash,
+    from src.config import (
+        CONFIG, DATA_DIR, MODEL_DIR, PRIMARY_TARGET, TARGETS,
+        review_threshold, target_title,
+    )
+    from src.data import is_blank_text
+    from src.models import (
+        build_features, ensemble_score_matrix, expand_proba,
+        top_k_from_scores, verify_model_hash,
     )
 except ImportError:  # flat layout, modules at the repository root
-    from paths import CONFIG_PATH, DATA_DIR, MODEL_DIR
-    from utils import (
-        build_feature_matrix_many, ensemble_score_matrix, expand_proba,
-        is_blank_text, top_k_from_scores, verify_model_hash,
+    from config import (
+        CONFIG, DATA_DIR, MODEL_DIR, PRIMARY_TARGET, TARGETS,
+        review_threshold, target_title,
     )
-
-
-CONFIG = json.loads(CONFIG_PATH.read_text())
-TARGETS: dict = CONFIG.get("targets", {})
-PRIMARY_TARGET = CONFIG.get("primary_target", next(iter(TARGETS), ""))
-DEFAULT_REVIEW_THRESHOLD = CONFIG.get("review_threshold", 0.69)
-
-
-# Returns the review threshold configured for one target.
-def review_threshold(target: str) -> float:
-    """Confidence below which `target` is flagged for a human.
-
-    Set per target: the levels differ enormously in how consistently people
-    code them, so one global number would either wave through the deepest
-    level or flag almost everything at the top.
-    """
-    return float(TARGETS.get(target, {}).get("review_threshold", DEFAULT_REVIEW_THRESHOLD))
-
-
-# Human-facing name for a target.
-def target_title(target: str) -> str:
-    """Readable label, e.g. "process_cat" -> "Process Cat"."""
-    aliases = CONFIG.get("column_aliases", {})
-    column = TARGETS.get(target, {}).get("column", target)
-    names = aliases.get(column) or aliases.get(target)
-    return names[0] if names else target.replace("_", " ").title()
+    from data import is_blank_text
+    from models import (
+        build_features, ensemble_score_matrix, expand_proba,
+        top_k_from_scores, verify_model_hash,
+    )
 
 
 # Loads the models saved for one directory, honouring its ensemble.json.
@@ -258,7 +240,7 @@ def classify(
     out = pd.DataFrame(index=range(len(texts)))
     blank = [is_blank_text(t) for t in texts]
 
-    X = build_feature_matrix_many(texts, bundle["tfidf_word"], bundle["tfidf_char"])
+    X = build_features(texts, bundle["tfidf_word"], bundle["tfidf_char"])
 
     for target in bundle["order"]:
         entry = bundle["targets"][target]

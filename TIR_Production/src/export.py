@@ -11,12 +11,9 @@ from typing import Dict, List, Sequence
 import pandas as pd
 
 try:  # modules under src/
-    from src.inference import CONFIG, TARGETS
+    from src.config import TARGETS, heading
 except ImportError:  # flat layout, modules at the repository root
-    from inference import CONFIG, TARGETS
-
-
-ALIASES: dict = CONFIG.get("column_aliases", {})
+    from config import TARGETS, heading
 
 # The identifying fields a coder can type alongside the description, in the
 # order they belong in the sheet.
@@ -24,18 +21,6 @@ DETAIL_FIELDS: List[str] = [
     "doc_number", "item_id", "item_type", "severity",
     "doc_title", "description_1", "description_2",
 ]
-
-
-# Gives a canonical field the heading the TIR team reads it under.
-def heading(canonical: str) -> str:
-    """Return the export heading for a canonical field name.
-
-    Taken from the first alias in config.json rather than written out again
-    here, so the headings a coder sees and the headings the importer accepts
-    cannot drift apart.
-    """
-    names = ALIASES.get(canonical)
-    return names[0] if names else canonical.replace("_", " ").title()
 
 
 # Builds the sheet from the rows accumulated during a session.

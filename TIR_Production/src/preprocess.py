@@ -14,39 +14,25 @@ import pandas as pd
 from sklearn.model_selection import train_test_split
 
 try:  # modules under src/
-    from src.columns import canonicalize, resolve_columns
-    from src.paths import CONFIG_PATH, DATA_DIR, ROOT
-    from src.utils import build_text_series, normalize_categories, validate_input_dataframe
+    from src.config import (
+        ALIASES, CONFIG, CONFIG_PATH, HIERARCHY_PATH, PRIMARY_TARGET, PROC_DIR,
+        RAW_DIR, REQUIRED_COLS, ROOT, SEED, TARGETS, TEXT_COLS,
+        label_map_path, validate_target_order,
+    )
+    from src.data import (
+        build_text_series, canonicalize, normalize_categories, resolve_columns,
+        validate_input_dataframe,
+    )
 except ImportError:  # flat layout, modules at the repository root
-    from columns import canonicalize, resolve_columns
-    from paths import CONFIG_PATH, DATA_DIR, ROOT
-    from utils import build_text_series, normalize_categories, validate_input_dataframe
-
-# Loads configuration values such as the random seed.
-CONFIG = json.loads(CONFIG_PATH.read_text())
-SEED = CONFIG.get("random_seed", 42)
-ALIASES: dict = CONFIG.get("column_aliases", {})
-REQUIRED_COLS = CONFIG.get("required_columns", ["description_1"])
-TEXT_COLS = CONFIG.get("text_columns", REQUIRED_COLS)
-
-# Each entry names a column to predict and how to tidy its values.  Adding a
-# target here is all that preprocess and train need to pick it up.
-TARGETS: dict = CONFIG.get("targets", {})
-PRIMARY_TARGET = CONFIG.get("primary_target", next(iter(TARGETS), ""))
-
-# Defines paths used for raw and processed datasets.
-RAW_DIR: Path = DATA_DIR / "raw"
-PROC_DIR: Path = DATA_DIR / "processed"
-
-
-# Returns the label-map path for a target.
-def label_map_path(target: str) -> Path:
-    """Path of the id -> category-name map written for `target`."""
-    return DATA_DIR / f"label_map_{target}.json"
-
-
-# Path of the parent -> children table shared by training and inference.
-HIERARCHY_PATH: Path = DATA_DIR / "hierarchy.json"
+    from config import (
+        ALIASES, CONFIG, CONFIG_PATH, HIERARCHY_PATH, PRIMARY_TARGET, PROC_DIR,
+        RAW_DIR, REQUIRED_COLS, ROOT, SEED, TARGETS, TEXT_COLS,
+        label_map_path, validate_target_order,
+    )
+    from data import (
+        build_text_series, canonicalize, normalize_categories, resolve_columns,
+        validate_input_dataframe,
+    )
 
 
 # Loads the normalisation table a target refers to, if any.
@@ -248,18 +234,7 @@ def main() -> None:
             f"is not one of: {', '.join(TARGETS)}"
         )
 
-    # A child target must be listed after its parent, so that inference can
-    # predict the parent first.  Checked here rather than at inference time,
-    # where the failure would be a confusing KeyError per row.
-    seen: List[str] = []
-    for target, spec in TARGETS.items():
-        parent = spec.get("parent")
-        if parent and parent not in seen:
-            raise ValueError(
-                f"{CONFIG_PATH.name}: target '{target}' declares parent "
-                f"'{parent}', which must be defined before it in 'targets'."
-            )
-        seen.append(target)
+    validate_target_order()
 
     # Loads and concatenates raw data files.
     frames = []

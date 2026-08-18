@@ -37,6 +37,20 @@ TIR_Production/
 └── requirements.txt
 ```
 
+`src/` holds the pipeline in twelve modules:
+
+| | |
+|---|---|
+| `config.py` | paths and settings, parsed once for everything else |
+| `data.py` | recognising a QPS export's columns, building the model's text |
+| `models.py` | features, the ensemble arithmetic, artifact integrity |
+| `inference.py` | loading the models and classifying |
+| `feedback.py` | reviewer corrections, stored and reapplied |
+| `export.py` | the session workbook |
+| `preprocess.py`, `train.py` | building the training data, fitting the models |
+| `classify.py`, `reports.py` | the batch CLI and the two study reports |
+| `app.py`, `api.py` | the Streamlit UI and the HTTP endpoint |
+
 The QPS workbooks sit beside `TIR_Production/`, where the TIR team keeps them;
 `--raw_csv` finds them there, in `data/raw/`, or at any path given.
 
@@ -57,14 +71,13 @@ python -m src.train
 python -m src.train --gate
 
 # The two study deliverables
-python -m src.report_data --raw_csv "QPS Pull ….xlsx" "TIR Export Example1.xlsx"
-python -m src.report_benchmark
+python -m src.reports all --raw_csv "QPS Pull ….xlsx" "TIR Export Example1.xlsx"
 
 # Classify a file from the command line
-python -m src.ensemble --raw_csv "<export>.xlsx" --out predictions.csv
+python -m src.classify --raw_csv "<export>.xlsx" --out predictions.csv
 
 # The web app
-streamlit run src/streamlit_app.py
+streamlit run src/app.py
 
 # Tests
 python -m pytest test

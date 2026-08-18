@@ -10,11 +10,13 @@ from fastapi import FastAPI
 from pydantic import BaseModel
 
 try:  # modules under src/
+    from src.config import TEXT_COLS
+    from src.data import build_text_series, clean_text, is_blank_text
     from src.inference import classify, load_bundle
-    from src.utils import build_text_series, clean_text, is_blank_text
 except ImportError:  # flat layout, modules at the repository root
+    from config import TEXT_COLS
+    from data import build_text_series, clean_text, is_blank_text
     from inference import classify, load_bundle
-    from utils import build_text_series, clean_text, is_blank_text
 
 import pandas as pd
 
@@ -46,7 +48,7 @@ def predict(item: TIRInput):
         "description_2": item.description_2,
         "doc_title": item.doc_title,
     }])
-    text = build_text_series(frame, ["description_1", "description_2", "doc_title"]).iloc[0]
+    text = build_text_series(frame, TEXT_COLS).iloc[0]
 
     # No description, no answer.  The models would still score an all-zero
     # vector and can report high confidence doing it, so nothing is guessed.

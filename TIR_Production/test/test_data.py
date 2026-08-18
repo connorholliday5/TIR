@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-# Module: test.test_columns
+# Module: test.test_data
 # Covers the alias layer: the same field arrives under a different heading in
 # every QPS export, and everything downstream assumes canonical names.
 
 import pandas as pd
 import pytest
 
-from src.columns import canonicalize, missing_columns, resolve_columns
+from src.data import canonicalize, missing_columns, resolve_columns
 
 
 ALIASES = {
