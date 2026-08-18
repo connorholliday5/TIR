@@ -23,7 +23,26 @@ column. Every layout is recognised automatically; the alias table lives in
 `config.json` under `column_aliases`, so a new export format is a
 configuration change rather than a code change.
 
+## Layout
+
+```
+TIR_Production/
+├── config/config.json     settings: column aliases, targets, thresholds
+├── data/                  processed splits, label maps, hierarchy (generated)
+├── logs/
+├── models/                fitted vectorizers and classifiers (generated)
+├── reports/               data_sufficiency.md, benchmark.md (generated)
+├── src/                   the pipeline
+├── test/                  pytest suite
+└── requirements.txt
+```
+
+The QPS workbooks sit beside `TIR_Production/`, where the TIR team keeps them;
+`--raw_csv` finds them there, in `data/raw/`, or at any path given.
+
 ## Running it
+
+Everything runs from inside `TIR_Production/`:
 
 ```bash
 pip install -r requirements.txt
@@ -34,6 +53,9 @@ python -m src.preprocess --raw_csv "QPS Pull ….xlsx" "TIR Export Example1.xlsx
 # Fit the models
 python -m src.train
 
+# Optionally re-run the comparison against boosting and logistic regression
+python -m src.train --gate
+
 # The two study deliverables
 python -m src.report_data --raw_csv "QPS Pull ….xlsx" "TIR Export Example1.xlsx"
 python -m src.report_benchmark
@@ -41,13 +63,12 @@ python -m src.report_benchmark
 # Classify a file from the command line
 python -m src.ensemble --raw_csv "<export>.xlsx" --out predictions.csv
 
-# Or use the web app
+# The web app
 streamlit run src/streamlit_app.py
-```
 
-The modules also run from a flat checkout, where every file sits at the
-repository root: use `python preprocess.py …` and `streamlit run
-streamlit_app.py` instead.
+# Tests
+python -m pytest test
+```
 
 ## Confirming the category is worth more than any model change
 

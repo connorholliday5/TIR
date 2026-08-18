@@ -264,13 +264,21 @@ def main() -> None:
     # Loads and concatenates raw data files.
     frames = []
     for file in args.raw_csv:
-        path = Path(file)
-        if not path.exists():
-            path = RAW_DIR / Path(file).name
-        if not path.exists():
-            path = ROOT / Path(file).name
-        if not path.exists():
-            raise FileNotFoundError(f"Raw data file not found: {file}")
+        # Looked for as given, then in data/raw, then beside the project and
+        # one level above it — the QPS exports are normally kept next to the
+        # project folder rather than inside it.
+        candidates = [
+            Path(file),
+            RAW_DIR / Path(file).name,
+            ROOT / Path(file).name,
+            ROOT.parent / Path(file).name,
+        ]
+        path = next((c for c in candidates if c.exists()), None)
+        if path is None:
+            raise FileNotFoundError(
+                f"Raw data file not found: {file}. Looked in: "
+                + ", ".join(str(c.parent) for c in candidates)
+            )
 
         print(f"📄 Loading {path.name}")
         frames.append(load_raw(path))

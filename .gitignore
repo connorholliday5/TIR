@@ -7,11 +7,13 @@ __pycache__/
 venv/
 
 # Generated artifacts: rebuilt by `python -m src.preprocess` and `python -m src.train`
-models/
-data/processed/
-data/label_map_*.json
-data/hierarchy.json
-train.log
+TIR_Production/models/
+TIR_Production/data/processed/
+TIR_Production/data/label_map_*.json
+TIR_Production/data/hierarchy.json
+TIR_Production/logs/*.log
+TIR_Production/train.log
+TIR_Production/predictions.csv
 
 # Excel lock files left behind by an open workbook
 ~$*
