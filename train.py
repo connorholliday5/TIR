@@ -5,6 +5,7 @@
 # Trains the TF-IDF vectorizers and one calibrated classifier per target,
 # including a per-parent classifier for each hierarchical target.
 
+import argparse
 import json
 import logging
 import warnings
@@ -76,6 +77,13 @@ MIN_PARENT_ROWS = 10
 # cost", which is the question that decides what ships.  Raise these to give
 # the challengers a longer run.
 GATE = CONFIG.get("gate", {})
+# Screening the challenger families is off by default.  Measured on a held-out
+# split, the calibrated linear SVM matched the full three-model ensemble, while
+# boosting over a 180,000-column TF-IDF matrix took longer than everything else
+# in the pipeline combined — so paying for that comparison on every retrain buys
+# a result already recorded in reports/benchmark.md.  Turn it on with
+# `--gate`, or `"gate": {"enabled": true}`, when the comparison is wanted again.
+GATE_ENABLED = bool(GATE.get("enabled", False))
 GATE_BOOST_ROUNDS = int(GATE.get("max_boost_rounds", 120))
 GATE_EARLY_STOPPING = int(GATE.get("early_stopping_rounds", 20))
 GATE_MAX_ROWS = int(GATE.get("max_rows", 25_000))
@@ -193,6 +201,14 @@ def gate_models(target, X_train, y_train, X_val, y_val, num_labels) -> Tuple[dic
 
     # The challengers are screened on a capped sample; the SVM that ships is
     # fitted on every labelled row.
+    if not GATE_ENABLED:
+        svm_only = fit_svm(X_train, y_train)
+        if svm_only is None:
+            raise RuntimeError(f"{target}: not enough labelled data to fit a classifier.")
+        score = macro_f1(svm_only, X_val, y_val)
+        info(f"  {target}: calibrated SVM macro-F1 {score:.4f} (challengers not screened)")
+        return {"svm": svm_only}, {"svm": score}
+
     if len(y_train) > GATE_MAX_ROWS:
         rng = np.random.default_rng(SEED)
         sample = rng.choice(len(y_train), GATE_MAX_ROWS, replace=False)
@@ -370,6 +386,17 @@ def train_hierarchical(
 
 # Runs the complete training pipeline.
 def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--gate", action="store_true",
+        help="Also fit logistic regression and boosting, and keep either only "
+             "if it beats the calibrated SVM on validation macro-F1.",
+    )
+    args = parser.parse_args()
+
+    global GATE_ENABLED
+    GATE_ENABLED = GATE_ENABLED or args.gate
+
     info("Starting training…")
 
     if not TARGETS:
