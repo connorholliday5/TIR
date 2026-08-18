@@ -14,13 +14,11 @@
 import hashlib
 import re
 from pathlib import Path
-from typing import Any, List, Sequence, cast
+from typing import Any, Dict, List, Optional, Sequence, Tuple, cast
 
 import numpy as np
 import pandas as pd
 from scipy.sparse import csr_matrix, hstack, vstack
-
-from src.embedding import SubwordHashEmbedder
 
 
 # Stacks sparse blocks side by side and returns a CSR matrix.
@@ -83,42 +81,94 @@ def is_blank_text(text) -> bool:
     return not str(text).strip() or str(text).strip().lower() in {"nan", "none"}
 
 
-# Blends the three model outputs into a single prediction per row.
-def combine_ensemble_scores(
-    svm_pred: np.ndarray,
-    lr_proba: np.ndarray,
-    xgb_proba: np.ndarray,
-    weights: dict,
-    num_labels: int,
-) -> tuple[np.ndarray, np.ndarray]:
-    """Weight and combine the SVM, LR and XGBoost outputs.
+# Blends the per-model probabilities into one score per category.
+def ensemble_score_matrix(
+    probas: Dict[str, np.ndarray], weights: Dict[str, float], num_labels: int
+) -> np.ndarray:
+    """Weight and sum each model's probabilities into one (n_rows, n_labels).
 
-    The SVM is a hard classifier, so its prediction is one-hot encoded before
-    being weighted against the two probability outputs.  Lives here so the
-    API, the batch pipeline and the UI cannot drift apart on the arithmetic.
+    Every model contributes a probability distribution, so the weighted sum is
+    itself a probability once the weights sum to one.  That is what lets
+    `review_threshold` mean "at least this likely" and lets the coverage curve
+    in src.report_benchmark be read as a precision guarantee.
+
+    The previous form one-hot encoded the SVM's hard prediction and gave it a
+    flat 0.40, which put a floor of 0.40 under the winning score and a ceiling
+    of 0.60 over every rival — so the number reported as "confidence" could not
+    be compared against a probability at all.  The SVM is calibrated at
+    training time precisely so it can supply `predict_proba` here.
 
     Args:
-        svm_pred: Predicted label per row, shape (n_rows,).
-        lr_proba: Logistic Regression probabilities, shape (n_rows, n_labels).
-        xgb_proba: XGBoost probabilities, shape (n_rows, n_labels).
-        weights: Per-model weights, keyed "xgb", "svm" and "lr".
+        probas: Model name -> (n_rows, num_labels) probabilities.
+        weights: Model name -> weight.  Models absent from `probas`, or
+            weighted zero, are skipped.
         num_labels: Total number of categories.
 
     Returns:
-        A (label_ids, confidences) pair, each of shape (n_rows,).
+        An (n_rows, num_labels) array of blended scores.
     """
-    n_rows = len(svm_pred)
+    used = {
+        name: matrix for name, matrix in probas.items()
+        if float(weights.get(name, 0.0)) > 0.0
+    }
+    if not used:
+        raise ValueError(
+            "No model has a non-zero ensemble weight; nothing can be predicted. "
+            f"Weights were: {weights}"
+        )
 
-    svm_onehot = np.zeros((n_rows, num_labels), dtype=np.float32)
-    svm_onehot[np.arange(n_rows), np.asarray(svm_pred, dtype=int)] = 1.0
+    total = sum(float(weights[name]) for name in used)
+    n_rows = len(next(iter(used.values())))
 
-    combined = (
-        weights["xgb"] * np.asarray(xgb_proba, dtype=np.float32).reshape(n_rows, num_labels) +
-        weights["svm"] * svm_onehot +
-        weights["lr"] * np.asarray(lr_proba, dtype=np.float32).reshape(n_rows, num_labels)
-    )
+    combined = np.zeros((n_rows, num_labels), dtype=np.float32)
+    for name, matrix in used.items():
+        block = np.asarray(matrix, dtype=np.float32).reshape(n_rows, num_labels)
+        combined += (float(weights[name]) / total) * block
 
+    return combined
+
+
+# Reduces the blended scores to one prediction per row.
+def combine_ensemble_scores(
+    probas: Dict[str, np.ndarray], weights: Dict[str, float], num_labels: int
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Return the (label_ids, confidences) pair for the blended scores.
+
+    Args:
+        probas: Model name -> (n_rows, num_labels) probabilities.
+        weights: Per-model weights.
+        num_labels: Total number of categories.
+
+    Returns:
+        A (label_ids, confidences) pair, each of shape (n_rows,).  The
+        confidence is a probability, directly comparable to a threshold.
+    """
+    combined = ensemble_score_matrix(probas, weights, num_labels)
     return combined.argmax(axis=1), combined.max(axis=1)
+
+
+# Ranks the best few categories for each row.
+def top_k_from_scores(
+    scores: np.ndarray, k: int
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Return the `k` highest-scoring label ids per row and their scores.
+
+    Used where a single answer would overstate what the data supports: the
+    deepest Process level is coded consistently by people only about half the
+    time, so the model offers a short ranked list for a coder to pick from
+    rather than one label presented as the answer.
+
+    Returns:
+        (ids, scores), each of shape (n_rows, min(k, n_labels)), ordered best
+        first.
+    """
+    k = max(1, min(int(k), scores.shape[1]))
+    # argpartition finds the top k without sorting the whole row, then only
+    # those k are sorted; over a 1000-category label space that is the
+    # difference between sorting everything and sorting three items.
+    idx = np.argpartition(-scores, k - 1, axis=1)[:, :k]
+    ordered = np.take_along_axis(idx, np.argsort(-np.take_along_axis(scores, idx, 1), axis=1), axis=1)
+    return ordered, np.take_along_axis(scores, ordered, axis=1)
 
 
 # Standardises raw description text.
@@ -141,8 +191,13 @@ def clean_text(text: str) -> str:
 def build_text_series(df: pd.DataFrame, columns: Sequence[str]) -> pd.Series:
     """Join `columns` into the single text field the models are trained on.
 
-    Driven by `required_columns` in config.json, so training, batch inference
-    and the UI always compose their input the same way.
+    Driven by `text_columns` in config.json, so training, batch inference and
+    the UI always compose their input the same way.
+
+    Columns the frame does not carry are skipped rather than raised on: the
+    three QPS export layouts do not all include a Description 2, and a file
+    that omits one should still classify on what it does have.  At least one
+    of the requested columns must be present.
 
     `fillna` runs before `astype`: on pandas 2.x `astype(str)` renders a
     missing value as the literal string "nan", which `fillna` can no longer
@@ -158,13 +213,20 @@ def build_text_series(df: pd.DataFrame, columns: Sequence[str]) -> pd.Series:
     if not columns:
         raise ValueError("At least one description column is required.")
 
+    present = [name for name in columns if name in df.columns]
+    if not present:
+        raise ValueError(
+            f"None of the text column(s) {', '.join(columns)} are in the input; "
+            f"it has: {', '.join(str(c) for c in df.columns[:12])}…"
+        )
+
     # Subscripting a DataFrame is typed as returning either a Series or a
     # DataFrame; the column names here always select a single Series.
     def column(name: str) -> pd.Series:
         return cast(pd.Series, df[name]).fillna("").astype(str)
 
-    combined = column(columns[0])
-    for name in columns[1:]:
+    combined = column(present[0])
+    for name in present[1:]:
         combined = combined + " " + column(name)
 
     # Series.apply is typed as possibly returning a DataFrame, which it only
@@ -215,41 +277,46 @@ def validate_input_dataframe(df: pd.DataFrame, required: List[str]) -> None:
 
 
 # Builds the combined sparse feature vector for one text.
-def build_feature_matrix(
-    text: str,
-    tfidf_word,
-    tfidf_char,
-    embedder: SubwordHashEmbedder,
-) -> csr_matrix:
+def build_feature_matrix(text: str, tfidf_word, tfidf_char) -> csr_matrix:
     """Create the combined sparse feature vector for a single text string.
 
-    The function mirrors the logic used in `api`, `ensemble` and the UI
-    but lives in a single place so that any change is automatically
-    propagated everywhere.
+    The function mirrors the logic used in `api`, `ensemble` and the UI but
+    lives in a single place so that any change is automatically propagated
+    everywhere.
+
+    The dense subword-hash block that used to be appended here has been
+    removed.  It assigned every subword a random vector derived from a SHA-256
+    digest, so unlike the trained FastText vectors it replaced it carried no
+    semantic relationship between words, and its character 3-5 grams were the
+    same span `tfidf_char` already encodes exactly.  Measured against a
+    held-out split it cost 0.1 points of accuracy and 0.3 of macro-F1 while
+    taking roughly sixteen times as long to compute as training the model.
 
     Args:
         text: Cleaned text to encode.
         tfidf_word: Fitted word-level TF-IDF vectorizer.
         tfidf_char: Fitted character-level TF-IDF vectorizer.
-        embedder: Dense embedder rebuilt from `models/dense_meta.json`.
 
     Returns:
         A CSR matrix of shape (1, n_features).
     """
-    # TF‑IDF part
-    Xw = tfidf_word.transform([text])
-    Xc = tfidf_char.transform([text])
+    return hstack_csr([tfidf_word.transform([text]), tfidf_char.transform([text])])
 
-    # Dense subword part (dense → CSR)
-    dense = csr_matrix(embedder.embed(text).reshape(1, -1))
 
-    # Concatenate both representations, in the same column order as training
-    return hstack_csr([Xw, Xc, dense])
+# Builds the feature matrix for many texts at once.
+def build_feature_matrix_many(texts: Sequence[str], tfidf_word, tfidf_char) -> csr_matrix:
+    """Vectorised form of `build_feature_matrix` for a batch of texts.
+
+    Transforming a whole column in one call rather than looping a row at a
+    time is what keeps a 94,000-row export practical.
+    """
+    listed = [str(t) for t in texts]
+    return hstack_csr([tfidf_word.transform(listed), tfidf_char.transform(listed)])
 
 
 # Returns the SHA-256 digest of a file.
 def hash_file(path: Path) -> str:
-    """Return the hex SHA‑256 digest of a file."""
+    """Return the hex SHA-256 digest of a file."""
     sha256 = hashlib.sha256()
     with path.open("rb") as f:
         for block in iter(lambda: f.read(65536), b""):
@@ -266,7 +333,7 @@ def verify_model_hash(model_path: Path) -> None:
     """
     hash_path = model_path.with_suffix(model_path.suffix + ".sha256")
     if not hash_path.is_file():
-        # No hash file – skip verification (optional safety net)
+        # No hash file - skip verification (optional safety net)
         return
 
     expected = hash_path.read_text().strip()

@@ -26,8 +26,12 @@ from typing import List, Optional, Sequence, Tuple, cast
 import numpy as np
 import pandas as pd
 
-from src.embedding import SubwordHashEmbedder
-from src.utils import clean_text
+try:  # modules under src/
+    from src.embedding import SubwordHashEmbedder
+    from src.utils import clean_text
+except ImportError:  # flat layout, modules at the repository root
+    from embedding import SubwordHashEmbedder
+    from utils import clean_text
 
 
 FEEDBACK_COLUMNS = ["timestamp", "target", "text", "predicted", "corrected"]

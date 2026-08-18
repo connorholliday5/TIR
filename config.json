@@ -1,27 +1,125 @@
 {
   "random_seed": 42,
   "ensemble_weights": {
-    "xgb": 0.40,
-    "svm": 0.40,
-    "lr": 0.20
+    "svm": 1.0,
+    "xgb": 0.0,
+    "lr": 0.0
   },
-  "required_columns": [
-    "Description 1"
+  "column_aliases": {
+    "description_1": [
+      "Description 1",
+      "DESCRIPTION_ONE",
+      "Item Description 1"
+    ],
+    "description_2": [
+      "Description 2",
+      "DESCRIPTION_TWO",
+      "Item Description 2"
+    ],
+    "doc_title": [
+      "Doc Title",
+      "TITLE",
+      "Title"
+    ],
+    "doc_description": [
+      "Doc Description",
+      "DESCRIPTION"
+    ],
+    "metric_cat": [
+      "Metric Cat",
+      "METRIC_CATEGORY",
+      "Item Metric Category"
+    ],
+    "metric_sub": [
+      "Metric Sub",
+      "METRIC_SUB_CATEGORY",
+      "Item Metric Sub-Category"
+    ],
+    "metric_l3": [
+      "Metric Level3",
+      "METRIC_3RD_LEVEL_CATEGORY",
+      "Item Metric Category Level 3"
+    ],
+    "process_cat": [
+      "Process Cat",
+      "PROCESS_CATEGORY",
+      "Item Process Category"
+    ],
+    "process_sub": [
+      "Process Sub",
+      "PROCESS_SUB_CATEGORY",
+      "Item Process Sub-Category"
+    ],
+    "process_l3": [
+      "Process Level3",
+      "PROCESS_3RD_LEVEL_CATEGORY",
+      "Item Process Category Level 3"
+    ],
+    "doc_number": [
+      "Doc Number",
+      "DOCUMENT_NUMBER",
+      "Serial Number"
+    ],
+    "item_id": [
+      "Item ID"
+    ],
+    "item_type": [
+      "Item Type",
+      "ITEM_TYPE"
+    ],
+    "severity": [
+      "Severity Level",
+      "SEVERITY_LEVEL",
+      "Item Severity Code"
+    ],
+    "resp_department": [
+      "Item Resp Department",
+      "RESPONSIBLE_DEPARTMENT",
+      "Resp Org Code"
+    ],
+    "facility_site": [
+      "Item Facility/Site",
+      "FACILITY_SITE",
+      "Location"
+    ]
+  },
+  "text_columns": [
+    "description_1",
+    "description_2",
+    "doc_title"
   ],
-  "review_threshold": 0.9,
+  "required_columns": [
+    "description_1"
+  ],
   "primary_target": "process_cat",
   "targets": {
+    "metric_cat": {
+      "column": "metric_cat",
+      "min_class_size": 3,
+      "review_threshold": 0.8
+    },
     "process_cat": {
-      "column": "Process Cat",
+      "column": "process_cat",
       "normalization": "category_normalization",
       "unknown_value": "OTHER",
-      "min_class_size": 3
+      "min_class_size": 3,
+      "review_threshold": 0.69
     },
-    "metric_cat": {
-      "column": "Metric Cat",
-      "min_class_size": 3
+    "process_sub": {
+      "column": "process_sub",
+      "parent": "process_cat",
+      "min_class_size": 10,
+      "review_threshold": 0.6
+    },
+    "process_l3": {
+      "column": "process_l3",
+      "parent": "process_sub",
+      "min_class_size": 10,
+      "top_k": 3,
+      "review_threshold": 0.5
     }
   },
+  "review_threshold": 0.69,
   "feedback": {
     "enabled": true,
     "similarity_threshold": 0.88
@@ -58,6 +156,15 @@
     "to tools": "TO TOOLS",
     "lh lifting & handling": "LH LIFTING & HANDLING",
     "fac facilities": "FAC FACILITIES",
+    "bl blasting": "BL BLASTING",
+    "eng engineering processes": "ENG ENGINEERING PROCESSES",
+    "ht hull treatment": "HT HULL TREATMENT",
+    "sh shielding": "SH SHIELDING",
     "other": "OTHER"
+  },
+  "gate": {
+    "max_boost_rounds": 120,
+    "early_stopping_rounds": 20,
+    "max_rows": 25000
   }
 }

@@ -2,155 +2,128 @@
 # -*- coding: utf-8 -*-
 
 # Module: src.tune_weights
-# Searches the ensemble weights on the validation split.
-#
-# The three model outputs are blended with fixed weights from config.json.
-# Those were chosen by hand; this grid-searches them against held-out data and
-# prints the best set, so the choice is measured rather than assumed.
-#
-# The search runs on the VALIDATION split only.  Tuning on test would make the
-# reported accuracy optimistic, since the weights would have been fitted to
-# the very rows used to judge them.
+# Searches the ensemble weights for each flat target on the validation split.
 #
 # Run after training, from the repository root:
 #     python -m src.tune_weights                 # report only
-#     python -m src.tune_weights --write         # also update config.json
+#     python -m src.tune_weights --write         # also update the ensemble.json files
+#
+# The search runs on the VALIDATION split only.  Tuning on test would make the
+# reported figures optimistic, since the weights would have been fitted to the
+# very rows used to judge them.
 
 import argparse
 import json
 from itertools import product
 
-import joblib
 import numpy as np
 import pandas as pd
-import xgboost as xgb
+from sklearn.metrics import f1_score
 
-from src.embedding import SubwordHashEmbedder
-from src.paths import ROOT
-from src.utils import (
-    build_feature_matrix,
-    clean_text,
-    combine_ensemble_scores,
-    expand_proba,
-    vstack_csr,
-)
+try:  # modules under src/
+    from src.inference import TARGETS, _score, load_bundle
+    from src.paths import DATA_DIR, MODEL_DIR
+    from src.utils import build_feature_matrix_many, ensemble_score_matrix, expand_proba
+except ImportError:  # flat layout, modules at the repository root
+    from inference import TARGETS, _score, load_bundle
+    from paths import DATA_DIR, MODEL_DIR
+    from utils import build_feature_matrix_many, ensemble_score_matrix, expand_proba
 
 
-CONFIG_PATH = ROOT / "config" / "config.json"
-CONFIG = json.loads(CONFIG_PATH.read_text())
-TARGETS: dict = CONFIG.get("targets", {})
-
-PROC_DIR = ROOT / "data" / "processed"
-MODEL_DIR = ROOT / "models"
-DATA_DIR = ROOT / "data"
+PROC_DIR = DATA_DIR / "processed"
 
 
 # Yields every weight combination on a grid, normalised to sum to one.
-def weight_grid(step: float = 0.05):
-    """Yield {"xgb","svm","lr"} weightings in `step` increments."""
+def weight_grid(names, step: float = 0.05):
+    """Yield weightings over `names` in `step` increments."""
     points = [round(i * step, 4) for i in range(int(1 / step) + 1)]
-    for xgb_w, svm_w in product(points, points):
-        lr_w = round(1.0 - xgb_w - svm_w, 4)
-        if lr_w < 0:
+    for combination in product(points, repeat=len(names) - 1):
+        remainder = round(1.0 - sum(combination), 4)
+        if remainder < 0:
             continue
-        yield {"xgb": xgb_w, "svm": svm_w, "lr": lr_w}
-
-
-# Scores one weighting against the validation labels.
-def accuracy_for(weights, svm_pred, lr_proba, xgb_proba, y_true, num_labels) -> float:
-    """Return validation accuracy for a candidate weighting."""
-    pred, _ = combine_ensemble_scores(svm_pred, lr_proba, xgb_proba, weights, num_labels)
-    return float((pred == y_true).mean())
+        yield dict(zip(names, (*combination, remainder)))
 
 
 # Searches the grid for one target.
-def tune_target(target: str, val_df: pd.DataFrame, features) -> dict:
-    """Return the best weighting for `target` and how it compares to config."""
-    raw = json.loads((DATA_DIR / f"label_map_{target}.json").read_text())
-    num_labels = len(raw)
+def tune_target(target: str, entry: dict, X, y_true) -> dict:
+    """Return the best weighting for `target`, scored by macro-F1.
 
-    rows = val_df[f"label_{target}"].to_numpy() >= 0
-    y_true = val_df.loc[rows, f"label_{target}"].astype(int).to_numpy()
-    X = features[rows]
+    Macro-F1 rather than accuracy: the categories are unbalanced enough that
+    accuracy barely moves when the rare ones are all wrong, which is exactly
+    the failure the weighting could help with.
+    """
+    num_labels = len(entry["id2name"])
+    names = list(entry["models"])
+    if len(names) < 2:
+        print(f"\n=== {target} — only {names[0] if names else 'no'} model kept; nothing to tune ===")
+        return {}
 
-    target_dir = MODEL_DIR / target
-    svm_model = joblib.load(target_dir / "svm.pkl")
-    lr_model = joblib.load(target_dir / "lr.pkl")
-    booster = xgb.Booster()
-    booster.load_model(str(target_dir / "xgb.json"))
+    # Scored once per model, reused for every candidate weighting.
+    probas = {}
+    for name, model in entry["models"].items():
+        if name == "xgb":
+            import xgboost as xgb_lib
+            probas[name] = expand_proba(
+                model.predict(xgb_lib.DMatrix(X)), np.arange(num_labels), num_labels
+            )
+        else:
+            probas[name] = expand_proba(model.predict_proba(X), model.classes_, num_labels)
 
-    # Scored once, reused for every candidate weighting.
-    svm_pred = svm_model.predict(X)
-    lr_proba = expand_proba(lr_model.predict_proba(X), lr_model.classes_, num_labels)
-    xgb_proba = booster.predict(xgb.DMatrix(X))
+    id2name = entry["id2name"]
 
-    current = CONFIG.get("ensemble_weights", {"xgb": 0.40, "svm": 0.40, "lr": 0.20})
-    scored = [
-        (accuracy_for(w, svm_pred, lr_proba, xgb_proba, y_true, num_labels), w)
-        for w in weight_grid()
-    ]
-    scored.sort(key=lambda pair: pair[0], reverse=True)
+    def score(weights) -> float:
+        combined = ensemble_score_matrix(probas, weights, num_labels)
+        predicted = [id2name.get(int(i), "") for i in combined.argmax(axis=1)]
+        return float(f1_score(y_true, predicted, average="macro", zero_division=0))
 
-    best_acc, best = scored[0]
-    current_acc = accuracy_for(current, svm_pred, lr_proba, xgb_proba, y_true, num_labels)
+    scored = sorted(((score(w), w) for w in weight_grid(names)), key=lambda p: -p[0])
+    best_score, best = scored[0]
+    current = entry["weights"]
+    current_score = score(current)
 
     print(f"\n=== {target} — {len(y_true):,} validation rows ===")
-    print(f"  current  xgb {current['xgb']:.2f} / svm {current['svm']:.2f} / "
-          f"lr {current['lr']:.2f}  ->  {current_acc:.4f}")
-    print(f"  best     xgb {best['xgb']:.2f} / svm {best['svm']:.2f} / "
-          f"lr {best['lr']:.2f}  ->  {best_acc:.4f}   ({best_acc - current_acc:+.4f})")
-    print("  runners-up:")
-    for acc, w in scored[1:4]:
-        print(f"    xgb {w['xgb']:.2f} / svm {w['svm']:.2f} / lr {w['lr']:.2f}  {acc:.4f}")
+    print(f"  current  {current}  ->  {current_score:.4f}")
+    print(f"  best     {best}  ->  {best_score:.4f}   ({best_score - current_score:+.4f})")
+    for value, weights in scored[1:4]:
+        print(f"    {weights}  {value:.4f}")
 
-    return {"weights": best, "accuracy": best_acc, "current_accuracy": current_acc}
+    return best if best_score > current_score else current
 
 
 # Runs the search from the command line.
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "--write",
-        action="store_true",
-        help="Write the best weighting back into config/config.json",
-    )
+    parser.add_argument("--write", action="store_true", help="Update each ensemble.json")
     args = parser.parse_args()
 
-    val_df = pd.read_csv(PROC_DIR / "val.csv")
-    val_df["text"] = val_df["text"].astype(str).apply(clean_text)
+    val_df = pd.read_csv(PROC_DIR / "val.csv", low_memory=False)
+    bundle = load_bundle()
+    X = build_feature_matrix_many(
+        val_df["text"].astype(str).tolist(), bundle["tfidf_word"], bundle["tfidf_char"]
+    )
 
-    tfidf_word = joblib.load(MODEL_DIR / "tfidf_word.pkl")
-    tfidf_char = joblib.load(MODEL_DIR / "tfidf_char.pkl")
-    embedder = SubwordHashEmbedder.load(MODEL_DIR / "dense_meta.json")
+    for target, spec in TARGETS.items():
+        if spec.get("parent"):
+            print(f"\n=== {target} — per-parent models, weights not tuned ===")
+            continue
 
-    features = vstack_csr([
-        build_feature_matrix(t, tfidf_word, tfidf_char, embedder) for t in val_df["text"]
-    ])
+        entry = bundle["targets"][target]
+        rows = val_df[f"label_{target}"].to_numpy() >= 0
+        y_true = [
+            entry["id2name"].get(int(i), "")
+            for i in val_df.loc[rows, f"label_{target}"].astype(int)
+        ]
 
-    results = {t: tune_target(t, val_df, features) for t in TARGETS}
+        chosen = tune_target(target, entry, X[rows], y_true)
+        if args.write and chosen:
+            path = MODEL_DIR / target / "ensemble.json"
+            payload = json.loads(path.read_text())
+            payload["weights"] = chosen
+            path.write_text(json.dumps(payload, indent=4))
+            print(f"  ✔ wrote {path.relative_to(MODEL_DIR.parent)}")
 
-    # One weighting is shared by every target, so pick the set with the best
-    # mean validation accuracy rather than letting the last target win.
-    candidates = {}
-    for result in results.values():
-        key = tuple(sorted(result["weights"].items()))
-        candidates[key] = result["weights"]
-
-    if len(candidates) == 1:
-        chosen = next(iter(candidates.values()))
-        print(f"\nEvery target agrees on xgb {chosen['xgb']:.2f} / "
-              f"svm {chosen['svm']:.2f} / lr {chosen['lr']:.2f}")
-    else:
-        print("\nTargets prefer different weightings; keeping the configured set.")
-        print("Re-run with a single target, or accept the small per-target loss.")
-        chosen = CONFIG.get("ensemble_weights")
-
-    if args.write and chosen:
-        CONFIG["ensemble_weights"] = chosen
-        CONFIG_PATH.write_text(json.dumps(CONFIG, indent=2) + "\n")
-        print(f"✔ Wrote ensemble_weights to {CONFIG_PATH.relative_to(ROOT)}")
-    elif not args.write:
-        print("\n(report only — pass --write to update config.json)")
+    if not args.write:
+        print("\n(report only — pass --write to update the ensemble.json files)")
 
 
 if __name__ == "__main__":

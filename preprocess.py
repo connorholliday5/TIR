@@ -2,23 +2,32 @@
 # -*- coding: utf-8 -*-
 
 # Module: src.preprocess
-# Performs raw-data ingestion, text cleaning, category normalisation, and dataset splitting.
+# Performs raw-data ingestion, column canonicalisation, text cleaning,
+# category normalisation, hierarchy extraction and dataset splitting.
 
 import json
 import argparse
 from pathlib import Path
-from typing import cast
+from typing import Dict, List, cast
 
 import pandas as pd
 from sklearn.model_selection import train_test_split
 
-from src.paths import ROOT
-from src.utils import build_text_series, normalize_categories, validate_input_dataframe
+try:  # modules under src/
+    from src.columns import canonicalize, resolve_columns
+    from src.paths import CONFIG_PATH, DATA_DIR, ROOT
+    from src.utils import build_text_series, normalize_categories, validate_input_dataframe
+except ImportError:  # flat layout, modules at the repository root
+    from columns import canonicalize, resolve_columns
+    from paths import CONFIG_PATH, DATA_DIR, ROOT
+    from utils import build_text_series, normalize_categories, validate_input_dataframe
 
 # Loads configuration values such as the random seed.
-CONFIG = json.loads((ROOT / "config" / "config.json").read_text())
+CONFIG = json.loads(CONFIG_PATH.read_text())
 SEED = CONFIG.get("random_seed", 42)
-REQUIRED_COLS = CONFIG.get("required_columns", ["Description 1"])
+ALIASES: dict = CONFIG.get("column_aliases", {})
+REQUIRED_COLS = CONFIG.get("required_columns", ["description_1"])
+TEXT_COLS = CONFIG.get("text_columns", REQUIRED_COLS)
 
 # Each entry names a column to predict and how to tidy its values.  Adding a
 # target here is all that preprocess and train need to pick it up.
@@ -26,11 +35,8 @@ TARGETS: dict = CONFIG.get("targets", {})
 PRIMARY_TARGET = CONFIG.get("primary_target", next(iter(TARGETS), ""))
 
 # Defines paths used for raw and processed datasets.
-RAW_DIR: Path = ROOT / "data" / "raw"
-PROC_DIR: Path = ROOT / "data" / "processed"
-PROC_DIR.mkdir(parents=True, exist_ok=True)
-
-DATA_DIR: Path = ROOT / "data"
+RAW_DIR: Path = DATA_DIR / "raw"
+PROC_DIR: Path = DATA_DIR / "processed"
 
 
 # Returns the label-map path for a target.
@@ -39,12 +45,18 @@ def label_map_path(target: str) -> Path:
     return DATA_DIR / f"label_map_{target}.json"
 
 
+# Path of the parent -> children table shared by training and inference.
+HIERARCHY_PATH: Path = DATA_DIR / "hierarchy.json"
+
+
 # Loads the normalisation table a target refers to, if any.
 def normalization_for(spec: dict) -> dict:
     """Return the lower-case -> standard-form map named by `spec`.
 
     A target without a `normalization` key keeps its column values verbatim,
-    which is right for a taxonomy that is already consistent.
+    which is right for a taxonomy that is already consistent.  The Process
+    sub- and third-level codes are such a taxonomy: every value in the smaller
+    export also appears in the larger one, spelled identically.
     """
     key = spec.get("normalization")
     if not key:
@@ -53,10 +65,36 @@ def normalization_for(spec: dict) -> dict:
     table = CONFIG.get(key)
     if not table:
         raise ValueError(
-            f"config/config.json is missing '{key}': it maps each lower-case "
+            f"{CONFIG_PATH.name} is missing '{key}': it maps each lower-case "
             f"value of the '{spec['column']}' column to its standard form."
         )
     return table
+
+
+# Reads one raw export and renames its columns to canonical form.
+def load_raw(path: Path) -> pd.DataFrame:
+    """Load an Excel or CSV export with its columns canonicalised.
+
+    Each file is canonicalised on its own, before anything is concatenated:
+    the three QPS layouts name the same field three different ways
+    ("Description 1", "DESCRIPTION_ONE", "Item Description 1"), so combining
+    them first would produce a frame of disjoint, mostly-empty columns.
+    """
+    if path.suffix.lower() in {".xlsx", ".xls"}:
+        df = pd.read_excel(path)
+    elif path.suffix.lower() == ".csv":
+        df = pd.read_csv(path)
+    else:
+        raise ValueError(f"Unsupported file type: {path.name}")
+
+    resolved = resolve_columns(df, ALIASES)
+    print(f"  ↳ {len(df):,} rows, {len(resolved)}/{len(ALIASES)} known fields recognised")
+
+    unrecognised = [name for name in ALIASES if name not in resolved]
+    if unrecognised:
+        print(f"    (absent from this file: {', '.join(unrecognised)})")
+
+    return canonicalize(df, ALIASES)
 
 
 # Standardises one target column and assigns it numeric labels.
@@ -73,7 +111,24 @@ def prepare_target(df: pd.DataFrame, target: str, spec: dict) -> pd.Series:
     """
     column = spec["column"]
     table = normalization_for(spec)
-    raw = cast(pd.Series, df[column]).astype(str).str.strip()
+    original = cast(pd.Series, df[column])
+    raw = original.astype(str).str.strip()
+
+    # An empty cell means "nobody coded this", which is not the same as "coded
+    # as something the table has not seen".  Both used to end up in the
+    # unknown bucket, and because a third of the larger pull is uncoded that
+    # turned 30,000 blanks into a fabricated OTHER category holding a third of
+    # the training rows.  Blanks are identified before normalisation and
+    # withheld below, so only genuinely unrecognised values become OTHER.
+    #
+    # Tested with `isna` as well as against the placeholder spellings: pandas 2
+    # renders a missing value as the literal string "nan" under `astype(str)`,
+    # while pandas 3 keeps it missing.  Checking only one of the two silently
+    # does nothing on the other version.
+    blank = original.isna() | raw.fillna("").str.strip().str.lower().isin(
+        ["", "nan", "none", "nat", "<na>"]
+    )
+
     values = normalize_categories(raw, table, spec.get("unknown_value", "OTHER"))
 
     # Names the categories the table does not cover.  Without this they are
@@ -81,7 +136,6 @@ def prepare_target(df: pd.DataFrame, target: str, spec: dict) -> pd.Series:
     # categories went unnoticed in the sample export.  A new file is the most
     # likely place for a spelling the table has never seen.
     if table:
-        blank = raw.str.lower().isin(["", "nan", "none"])
         unmapped = raw[~raw.str.lower().isin(table) & ~blank].value_counts()
         if len(unmapped):
             listed = ", ".join(f"{name} ({n})" for name, n in unmapped.head(10).items())
@@ -92,17 +146,18 @@ def prepare_target(df: pd.DataFrame, target: str, spec: dict) -> pd.Series:
                 f"{spec.get('unknown_value', 'OTHER')}: {listed}{more}"
             )
 
-    # Blank cells survive .astype(str) as the strings below; treat them as absent.
-    values = values.mask(values.str.lower().isin(["", "nan", "none"]))
+    # Blank cells survive .astype(str) as the strings above; treat them as absent.
+    values = values.mask(blank | values.fillna("").str.lower().isin(["", "nan", "none"]))
 
     counts = cast(pd.Series, values.value_counts())
     min_size = int(spec.get("min_class_size", 3))
     # str() so the join below is unambiguous: the index holds category names.
     too_rare = sorted(str(name) for name in counts.loc[counts < min_size].index)
     if too_rare:
+        shown = ", ".join(too_rare[:8]) + ("" if len(too_rare) <= 8 else ", …")
         print(
             f"  ⚠ {target}: dropping {len(too_rare)} class(es) under "
-            f"{min_size} records: {', '.join(too_rare)}"
+            f"{min_size} records: {shown}"
         )
         values = values.mask(values.isin(too_rare))
 
@@ -119,6 +174,56 @@ def prepare_target(df: pd.DataFrame, target: str, spec: dict) -> pd.Series:
     return labels
 
 
+# Records which child categories were observed under each parent.
+def build_hierarchy(df: pd.DataFrame, label_maps: Dict[str, dict]) -> dict:
+    """Return {target: {parent category: [child categories]}}.
+
+    Built from the categories actually seen together in the training split
+    rather than from the shape of the codes.  The codes do nest — a sub-code
+    starts with its parent's code, as HAPI does under HA — but only in about
+    99.9% of records at the second level and 95.5% at the third, so a string
+    rule would quietly mis-file the remainder.  What the coders actually
+    recorded is the more reliable source.
+
+    Only the training split is passed in, so the validation and test rows
+    cannot influence which combinations the model is allowed to predict.
+    """
+    hierarchy: Dict[str, Dict[str, List[str]]] = {}
+
+    for target, spec in TARGETS.items():
+        parent = spec.get("parent")
+        if not parent:
+            continue
+
+        child_names = {int(k): v["name"] for k, v in label_maps[target].items()}
+        parent_names = {int(k): v["name"] for k, v in label_maps[parent].items()}
+
+        usable = df[(df[f"label_{target}"] >= 0) & (df[f"label_{parent}"] >= 0)]
+        pairs = (
+            usable[[f"label_{parent}", f"label_{target}"]]
+            .drop_duplicates()
+            .itertuples(index=False, name=None)
+        )
+
+        table: Dict[str, List[str]] = {}
+        for parent_id, child_id in pairs:
+            table.setdefault(parent_names[int(parent_id)], []).append(
+                child_names[int(child_id)]
+            )
+
+        hierarchy[target] = {p: sorted(set(c)) for p, c in sorted(table.items())}
+
+        widths = [len(c) for c in hierarchy[target].values()]
+        print(
+            f"  ✔ {target}: {len(hierarchy[target])} parent(s), "
+            f"{min(widths)}-{max(widths)} children each "
+            f"(median {sorted(widths)[len(widths) // 2]})"
+            if widths else f"  ⚠ {target}: no parent/child pairs observed"
+        )
+
+    return hierarchy
+
+
 # Runs the preprocessing pipeline from the command line.
 def main() -> None:
     parser = argparse.ArgumentParser()
@@ -126,62 +231,79 @@ def main() -> None:
         "--raw_csv",
         nargs="+",
         required=True,
-        help="Paths to one or more raw Excel or CSV files under data/raw",
+        help="Paths to one or more raw Excel or CSV files (data/raw, or anywhere)",
     )
     args = parser.parse_args()
 
+    PROC_DIR.mkdir(parents=True, exist_ok=True)
+
     if not TARGETS:
         raise ValueError(
-            "config/config.json is missing 'targets': it names the column to "
+            f"{CONFIG_PATH.name} is missing 'targets': it names the column to "
             "predict for each classification field."
         )
     if PRIMARY_TARGET not in TARGETS:
         raise ValueError(
-            f"config/config.json sets primary_target='{PRIMARY_TARGET}', which "
+            f"{CONFIG_PATH.name} sets primary_target='{PRIMARY_TARGET}', which "
             f"is not one of: {', '.join(TARGETS)}"
         )
+
+    # A child target must be listed after its parent, so that inference can
+    # predict the parent first.  Checked here rather than at inference time,
+    # where the failure would be a confusing KeyError per row.
+    seen: List[str] = []
+    for target, spec in TARGETS.items():
+        parent = spec.get("parent")
+        if parent and parent not in seen:
+            raise ValueError(
+                f"{CONFIG_PATH.name}: target '{target}' declares parent "
+                f"'{parent}', which must be defined before it in 'targets'."
+            )
+        seen.append(target)
 
     # Loads and concatenates raw data files.
     frames = []
     for file in args.raw_csv:
-        path = RAW_DIR / Path(file).name
+        path = Path(file)
         if not path.exists():
-            raise FileNotFoundError(f"Raw data file not found: {path}")
+            path = RAW_DIR / Path(file).name
+        if not path.exists():
+            path = ROOT / Path(file).name
+        if not path.exists():
+            raise FileNotFoundError(f"Raw data file not found: {file}")
 
-        print(f"📄 Loading {path}")
-
-        if path.suffix.lower() in {".xlsx", ".xls"}:
-            df = pd.read_excel(path)
-        elif path.suffix.lower() == ".csv":
-            df = pd.read_csv(path)
-        else:
-            raise ValueError(f"Unsupported file type: {file}")
-
-        frames.append(df)
+        print(f"📄 Loading {path.name}")
+        frames.append(load_raw(path))
 
     merged = pd.concat(frames, ignore_index=True)
-    print(f"✔ Merged {len(frames)} files. Total rows: {len(merged)}")
+    print(f"✔ Merged {len(frames)} file(s). Total rows: {len(merged):,}")
 
     label_columns = [spec["column"] for spec in TARGETS.values()]
-    validate_input_dataframe(merged, [*REQUIRED_COLS, *label_columns])
+    validate_input_dataframe(merged, REQUIRED_COLS)
 
-    # Drops records repeated across files.  The two sample exports are byte
-    # identical, so passing both would otherwise duplicate every record and put
-    # the same TIR into the training and the test split.
-    #
-    # Matching is on the whole row, not just the description: two distinct TIRs
-    # can legitimately share a description and labels while differing in serial
-    # number or date, and those are real records that belong in training.
+    missing_labels = [c for c in label_columns if c not in merged.columns]
+    if missing_labels:
+        raise ValueError(
+            "No input file carries the label column(s): "
+            f"{', '.join(missing_labels)}. Training needs a labelled export."
+        )
+
+    # Builds the model input text before de-duplicating, so that duplicates are
+    # judged on what the model actually reads.
+    merged["text"] = build_text_series(merged, TEXT_COLS)
+
+    # Drops records repeated across files.  The sample export turned out to be
+    # a 99.4% subset of the larger pull, and because the two use different
+    # column names a whole-row comparison found nothing in common — every one
+    # of those TIRs would have been trained on twice and split across train and
+    # test.  Matching on the canonical text and labels is what actually catches
+    # it: two rows the model reads identically and that carry the same answers
+    # cannot teach it anything different.
     before = len(merged)
-    merged = merged.drop_duplicates(keep="first")
+    merged = merged.drop_duplicates(subset=["text", *label_columns], keep="first")
     merged = merged.reset_index(drop=True)
     if len(merged) < before:
         print(f"✔ Removed {before - len(merged):,} duplicate row(s). Remaining: {len(merged):,}")
-
-    # Builds the model input text.  Checked up front rather than defaulted
-    # with .get(): a missing column made .get() return a plain str, so the
-    # next .astype() failed with an unrelated AttributeError.
-    merged["text"] = build_text_series(merged, REQUIRED_COLS)
 
     # Normalises each target column and assigns its numeric labels.
     print("Preparing targets:")
@@ -219,8 +341,16 @@ def main() -> None:
     print(f"✔ Saved train.csv ({len(train_df):,}), val.csv ({len(val_df):,}), "
           f"test.csv ({len(test_df):,})")
 
-    # No embedding corpus is exported: the dense subword embeddings are
-    # derived from the text itself by src.train, so there is nothing to fit.
+    # Records the parent/child taxonomy from the training split only.
+    print("Extracting hierarchy:")
+    label_maps = {
+        t: json.loads(label_map_path(t).read_text()) for t in TARGETS
+    }
+    HIERARCHY_PATH.write_text(json.dumps(build_hierarchy(train_df, label_maps), indent=4))
+    print(f"✔ Saved hierarchy: {HIERARCHY_PATH}")
+
+    # No embedding corpus is exported: the models read TF-IDF features that
+    # src.train fits directly from the text.
 
     print("\n Preprocessing complete!\n")
 
