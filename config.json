@@ -1,0 +1,63 @@
+{
+  "random_seed": 42,
+  "ensemble_weights": {
+    "xgb": 0.40,
+    "svm": 0.40,
+    "lr": 0.20
+  },
+  "required_columns": [
+    "Description 1"
+  ],
+  "review_threshold": 0.9,
+  "primary_target": "process_cat",
+  "targets": {
+    "process_cat": {
+      "column": "Process Cat",
+      "normalization": "category_normalization",
+      "unknown_value": "OTHER",
+      "min_class_size": 3
+    },
+    "metric_cat": {
+      "column": "Metric Cat",
+      "min_class_size": 3
+    }
+  },
+  "feedback": {
+    "enabled": true,
+    "similarity_threshold": 0.88
+  },
+  "embedding": {
+    "dim": 192,
+    "min_n": 3,
+    "max_n": 5,
+    "seed": 0,
+    "l2_normalize": false,
+    "max_cache": 100000
+  },
+  "category_normalization": {
+    "mn mechanical component": "MN MECHANICAL COMPONENT",
+    "el electrical": "EL ELECTRICAL",
+    "we weld": "WE WELD",
+    "fa fastener": "FA FASTENER",
+    "pt paint": "PT PAINT",
+    "ha hanger": "HA HANGER",
+    "pi pipe": "PI PIPE",
+    "lp label": "LP LABEL",
+    "ma material": "MA MATERIAL",
+    "ms mounts": "MS MOUNTS",
+    "cs computer system network": "CS COMPUTER SYSTEM NETWORK",
+    "ac area": "AC AREA",
+    "fi filter": "FI FILTER",
+    "lg lagging": "LG LAGGING",
+    "mc machining": "MC MACHINING",
+    "se seal": "SE SEAL",
+    "sm sheetmetal": "SM SHEETMETAL",
+    "st structure": "ST STRUCTURE",
+    "twd technical work document": "TWD TECHNICAL WORK DOCUMENT",
+    "in insulation": "IN INSULATION",
+    "to tools": "TO TOOLS",
+    "lh lifting & handling": "LH LIFTING & HANDLING",
+    "fac facilities": "FAC FACILITIES",
+    "other": "OTHER"
+  }
+}

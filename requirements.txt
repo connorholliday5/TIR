@@ -1,0 +1,22 @@
+# Text embeddings are provided by src/embedding.py and need numpy only:
+# no fasttext, no torch, no pretrained model download.
+scikit-learn==1.7.0
+xgboost==3.2.0                 
+pandas==2.3.3
+openpyxl==3.1.5                # Required by pandas to read .xlsx TIR exports
+numpy==2.4.3                   
+scipy==1.16.3                  
+joblib==1.5.3                  
+
+# API / web UI 
+fastapi==0.115.14              
+uvicorn==0.35.0                
+pydantic==2.13.3               
+pydantic-core==2.46.3          
+starlette==0.46.2              # Underlying framework for FastAPI (installed automatically, but kept for clarity)
+
+# Streamlit UI 
+streamlit==1.47.0             
+
+python-dotenv==1.2.2          
+watchdog==6.0.0     
