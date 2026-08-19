@@ -166,6 +166,7 @@
     "enabled": true,
     "max_boost_rounds": 350,
     "early_stopping_rounds": 50,
-    "max_rows": 0
+    "max_rows": 0,
+    "boost_features": 30000
   }
 }

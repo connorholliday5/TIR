@@ -8,6 +8,7 @@
 import argparse
 import json
 import logging
+import time
 import warnings
 from pathlib import Path
 from typing import Any, Dict, List, Tuple, cast
@@ -16,6 +17,7 @@ import numpy as np
 import pandas as pd
 import xgboost as xgb
 from sklearn.calibration import CalibratedClassifierCV
+from sklearn.feature_selection import SelectKBest, chi2
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.linear_model import LogisticRegression, SGDClassifier
 from sklearn.metrics import f1_score
@@ -23,7 +25,7 @@ from sklearn.svm import LinearSVC
 
 from src.config import (
     CONFIG, CONFIG_PATH, DATA_DIR, FEEDBACK_PATH, GATE, HIERARCHY_PATH,
-    MODEL_DIR, PROC_DIR, ROOT, SEED, TARGETS, label_map_path,
+    MODEL_DIR, PROC_DIR, ROOT, SEED, TARGETS, label_map_path, target_title,
 )
 from src.data import clean_text
 from src.feedback import feedback_training_rows
@@ -49,6 +51,40 @@ warnings.filterwarnings(
     message="The number of unique classes is greater than 50%",
     category=UserWarning,
 )
+
+
+# Model families under the names a reader who is not a data scientist can
+# follow.  The short keys are what the saved artifacts and the reports use.
+MODEL_NAMES = {
+    "svm": "Support vector machine",
+    "sgd": "Stochastic gradient",
+    "lr": "Logistic regression",
+    "xgb": "Gradient boosting",
+}
+
+
+# Records a line in train.log without putting it on screen.
+def log(msg):
+    """Write to the training log only.
+
+    Everything the run does is kept here.  The console shows the subset a
+    person watching it needs, because a coding team reads this output to see
+    whether the models are worth using, not to debug scikit-learn.
+    """
+    logging.info(msg)
+
+
+# Puts a line on screen and in the log.
+def say(msg=""):
+    print(msg, flush=True)
+    if msg.strip():
+        logging.info(msg)
+
+
+# Renders a macro-F1 as a score out of 100.
+def score_of(value: float) -> str:
+    """Format a macro-F1 for a reader who has never heard of one."""
+    return "  n/a" if value != value else f"{value * 100:5.1f}"
 
 
 # Prints a progress line and records it in the training log.
@@ -86,6 +122,7 @@ GATE_ENABLED = bool(GATE.get("enabled", True))
 GATE_BOOST_ROUNDS = int(GATE.get("max_boost_rounds", 350))
 GATE_EARLY_STOPPING = int(GATE.get("early_stopping_rounds", 50))
 GATE_MAX_ROWS = int(GATE.get("max_rows", 0))
+GATE_BOOST_FEATURES = int(GATE.get("boost_features", 30_000))
 
 
 # Removes old model artifacts before training.
@@ -167,7 +204,9 @@ def macro_f1(model, X, y) -> float:
     # A Booster predicts from its own matrix type and returns one probability
     # per class rather than a label, unlike every scikit-learn estimator here.
     if isinstance(model, xgb.Booster):
-        predicted = model.predict(xgb.QuantileDMatrix(X)).argmax(axis=1)
+        selector = getattr(model, "feature_selector", None)
+        columns = selector.transform(X) if selector is not None else X
+        predicted = model.predict(xgb.DMatrix(columns)).argmax(axis=1)
     else:
         predicted = model.predict(X)
 
@@ -198,14 +237,15 @@ def gate_models(target, X_train, y_train, X_val, y_val, num_labels) -> Tuple[dic
         if svm_only is None:
             raise RuntimeError(f"{target}: not enough labelled data to fit a classifier.")
         score = macro_f1(svm_only, X_val, y_val)
-        info(f"  {target}: calibrated SVM macro-F1 {score:.4f} (challengers not screened)")
+        say(f"            Method: {MODEL_NAMES['svm'].lower()} (others not compared)")
+        say(f"            Score: {score_of(score)}")
         return {"svm": svm_only}, {"svm": score}
 
     if GATE_MAX_ROWS and len(y_train) > GATE_MAX_ROWS:
         rng = np.random.default_rng(SEED)
         sample = rng.choice(len(y_train), GATE_MAX_ROWS, replace=False)
         Xg, yg = X_train[sample], np.asarray(y_train)[sample]
-        info(f"  {target}: screening challengers on {GATE_MAX_ROWS:,} of {len(y_train):,} rows")
+        log(f"{target}: screening challengers on {GATE_MAX_ROWS:,} of {len(y_train):,} rows")
     else:
         Xg, yg = X_train, np.asarray(y_train)
 
@@ -215,7 +255,8 @@ def gate_models(target, X_train, y_train, X_val, y_val, num_labels) -> Tuple[dic
 
     baseline = macro_f1(svm_model, X_val, y_val)
     report["svm"] = baseline
-    info(f"  {target}: calibrated SVM macro-F1 {baseline:.4f} (baseline)")
+    say("            Comparing methods, keeping whichever scores best:")
+    say(f"              {MODEL_NAMES['svm']:.<34} {score_of(baseline)}")
 
     # Several unrelated estimator types share this dict; each is scored
     # through its own branch in save_models and src.inference.
@@ -231,16 +272,17 @@ def gate_models(target, X_train, y_train, X_val, y_val, num_labels) -> Tuple[dic
     # for exhausting its memory cgroup receives SIGKILL and can catch nothing,
     # which is why the boosting matrices below are built as QuantileDMatrix
     # rather than left to take whatever memory they ask for.
-    def try_challenger(name: str, fit):
-        info(f"  {target}: {name}…")
+    def try_challenger(key: str, name: str, fit):
+        log(f"{target}: fitting {name}")
         try:
             model = fit()
         except Exception as exc:
-            info(f"  ⚠ {target}: {name} could not be fitted ({type(exc).__name__}: {exc})")
-            report[name] = float("nan")
+            say(f"              {MODEL_NAMES[key]:.<34}   failed")
+            log(f"{target}: {name} could not be fitted ({type(exc).__name__}: {exc})")
+            report[key] = float("nan")
             return None
-        report[name] = macro_f1(model, X_val, y_val)
-        info(f"  {target}: {name} macro-F1 {report[name]:.4f}")
+        report[key] = macro_f1(model, X_val, y_val)
+        say(f"              {MODEL_NAMES[key]:.<34} {score_of(report[key])}")
         return model
 
     # `modified_huber` rather than the default hinge: it is the loss that gives
@@ -249,7 +291,7 @@ def gate_models(target, X_train, y_train, X_val, y_val, num_labels) -> Tuple[dic
     # different optimum than LinearSVC despite both being linear — a smooth
     # loss with early stopping against a hinge fitted to convergence — which is
     # the point of carrying it as a separate candidate rather than a duplicate.
-    sgd_model = try_challenger("SGD (modified huber)", lambda: SGDClassifier(
+    sgd_model = try_challenger("sgd", "SGD (modified huber)", lambda: SGDClassifier(
         loss="modified_huber",
         class_weight="balanced",
         early_stopping=True,
@@ -258,11 +300,29 @@ def gate_models(target, X_train, y_train, X_val, y_val, num_labels) -> Tuple[dic
         random_state=SEED,
     ).fit(Xg, yg))
 
-    lr_model = try_challenger("Logistic Regression", lambda: LogisticRegression(
+    lr_model = try_challenger("lr", "Logistic Regression", lambda: LogisticRegression(
         max_iter=2500, solver="lbfgs", C=1.5, class_weight="balanced",
     ).fit(Xg, yg))
 
     def fit_booster():
+        # Boosting is the one family here that cannot be handed the full
+        # feature space.  It builds a histogram per feature per class, so
+        # 183,633 TF-IDF columns against even seven categories exhausted 13.7 GB
+        # and the run was killed outright — twice, the second time after the
+        # matrix itself had been made six times smaller, because the cost is in
+        # training rather than in storing the data.
+        #
+        # It is given the most informative GATE_BOOST_FEATURES columns instead.
+        # That is not a handicap so much as what trees are for: a tree splits on
+        # individual features and cannot use a hundred thousand of them, while a
+        # linear model weights all of them at once.  Selection uses chi-squared
+        # against this target's own labels, so the columns kept are the ones
+        # that separate its categories.
+        selector = SelectKBest(chi2, k=min(GATE_BOOST_FEATURES, Xg.shape[1]))
+        Xb = selector.fit_transform(Xg, yg)
+        Xb_val = selector.transform(X_val)
+        log(f"{target}: boosting on {Xb.shape[1]:,} of {Xg.shape[1]:,} features")
+
         params = {
             "objective": "multi:softprob",
             "num_class": num_labels,
@@ -272,16 +332,19 @@ def gate_models(target, X_train, y_train, X_val, y_val, num_labels) -> Tuple[dic
             "subsample": 0.9,
             "colsample_bytree": 0.9,
             "tree_method": "hist",
+            # Fewer histogram bins per feature, which is the other half of the
+            # memory this uses; 64 is ample for TF-IDF values.
+            "max_bin": 64,
             "reg_lambda": 1.0,
             "random_state": SEED,
         }
-        # QuantileDMatrix bins each feature as it reads it rather than
-        # materialising a second full copy of the matrix.  A plain DMatrix over
-        # 65,718 rows by 183,633 columns reached 13.5 GB here and the run was
-        # killed outright.
-        train_matrix = xgb.QuantileDMatrix(Xg, label=yg)
-        val_matrix = xgb.QuantileDMatrix(X_val, label=y_val, ref=train_matrix)
-        return xgb.train(
+        # max_bin has to be given to the matrix as well as to the booster;
+        # XGBoost refuses to train when the two disagree.
+        train_matrix = xgb.QuantileDMatrix(Xb, label=yg, max_bin=params["max_bin"])
+        val_matrix = xgb.QuantileDMatrix(
+            Xb_val, label=y_val, ref=train_matrix, max_bin=params["max_bin"]
+        )
+        booster = xgb.train(
             params,
             train_matrix,
             num_boost_round=GATE_BOOST_ROUNDS,
@@ -289,17 +352,27 @@ def gate_models(target, X_train, y_train, X_val, y_val, num_labels) -> Tuple[dic
             early_stopping_rounds=GATE_EARLY_STOPPING,
             verbose_eval=False,
         )
+        # The selector travels with the booster: whatever scores or predicts
+        # with it later must see the same columns it was fitted on.
+        booster.feature_selector = selector  # type: ignore[attr-defined]
+        return booster
 
-    booster = try_challenger("XGBoost", fit_booster)
+    booster = try_challenger("xgb", "XGBoost", fit_booster)
 
     for name, model in (("sgd", sgd_model), ("lr", lr_model), ("xgb", booster)):
         if model is None:
             continue
         if report[name] > baseline:
             kept[name] = model
-            info(f"  {target}: keeping {name} (macro-F1 {report[name]:.4f} > {baseline:.4f})")
+            log(f"{target}: keeping {name} ({report[name]:.4f} > {baseline:.4f})")
         else:
-            info(f"  {target}: dropping {name} (macro-F1 {report[name]:.4f} ≤ {baseline:.4f})")
+            log(f"{target}: dropping {name} ({report[name]:.4f} <= {baseline:.4f})")
+
+    if len(kept) == 1:
+        say(f"            Using:  {MODEL_NAMES['svm'].lower()} — the others scored lower")
+    else:
+        blended = ", ".join(MODEL_NAMES[n].lower() for n in kept)
+        say(f"            Using:  {blended}, blended together")
 
     return kept, report
 
@@ -334,7 +407,7 @@ def save_models(out_dir: Path, models: dict, report: dict) -> None:
 def train_hierarchical(
     target: str, spec: dict, label_maps: dict, hierarchy: dict,
     train_df, val_df, X_train, X_val,
-) -> None:
+) -> float:
     """Fit a separate classifier for each parent, over that parent's children.
 
     Predicting 1,079 third-level categories with one model is not workable:
@@ -416,10 +489,22 @@ def train_hierarchical(
     }, indent=4))
 
     mean_score = float(np.mean(scores)) if scores else 0.0
-    info(
-        f"  ✔ {target}: {fitted} per-parent model(s), {len(deterministic)} deterministic, "
-        f"{skipped} too thin to fit; mean per-parent validation macro-F1 {mean_score:.4f}"
+    parent_title = target_title(parent)
+    total_groups = fitted + len(deterministic) + skipped
+    say(f"            Chosen inside {parent_title}, so it can only return a code")
+    say(f"            that belongs under the {parent_title} it was given.")
+    say(f"            {total_groups} groups of codes:")
+    say(f"              {fitted} learned from examples")
+    if deterministic:
+        say(f"              {len(deterministic)} had only one possible answer")
+    if skipped:
+        say(f"              {skipped} had too few examples, so a coder is asked instead")
+    say(f"            Score: {score_of(mean_score)}")
+    log(
+        f"{target}: {fitted} per-parent models, {len(deterministic)} deterministic, "
+        f"{skipped} too thin; mean per-parent validation macro-F1 {mean_score:.4f}"
     )
+    return mean_score
 
 
 # Runs the complete training pipeline.
@@ -436,7 +521,11 @@ def main():
     if args.no_gate:
         GATE_ENABLED = False
 
-    info("Starting training…")
+    started = time.time()
+    say("=" * 70)
+    say("  Training the TIR liability coding models")
+    say("=" * 70)
+    log("Starting training")
 
     if not TARGETS:
         raise ValueError(f"{CONFIG_PATH.name} is missing 'targets'.")
@@ -454,6 +543,11 @@ def main():
     for df in (train_df, val_df):
         df["text"] = df["text"].astype(str).apply(clean_text)
 
+    say()
+    say("Step 1 of 3   Reading the coded TIRs")
+    say(f"              {len(train_df):,} to learn from, "
+        f"{len(val_df):,} held back to mark the work against")
+
     label_maps = {
         t: json.loads(label_map_path(t).read_text()) for t in TARGETS
     }
@@ -468,7 +562,7 @@ def main():
         corrections = feedback_training_rows(FEEDBACK_PATH, name2id, target=target)
 
         if corrections.empty:
-            info(f"No reviewer corrections to fold into {target}.")
+            log(f"No reviewer corrections to fold into {target}.")
             continue
 
         extra = pd.DataFrame({
@@ -476,11 +570,14 @@ def main():
             **{f"label_{t}": (corrections["label"] if t == target else -1) for t in TARGETS},
         })
         train_df = pd.concat([train_df, extra], ignore_index=True)
-        info(f"Added {len(extra)} reviewer correction(s) to {target}'s training rows.")
+        say(f"              {len(extra)} correction(s) you saved were folded into "
+            f"{target_title(target)}")
+        log(f"Added {len(extra)} reviewer corrections to {target}")
 
     # Trains TF-IDF vectorizers on training data.  These are unsupervised, so
     # one pair serves every target.
-    info("Training TF-IDF vectorizers…")
+    say()
+    say("Step 2 of 3   Learning the vocabulary of the descriptions")
 
     tfidf_word = TfidfVectorizer(
         lowercase=True,
@@ -517,7 +614,8 @@ def main():
     # scipy annotates a sparse matrix's shape as optional; hstack_csr always
     # returns a concrete two-dimensional CSR matrix.
     rows, columns = cast(tuple, X_train.shape)
-    info(f"  feature matrix: {rows:,} x {columns:,}")
+    say(f"              {columns:,} words and word-fragments found across {rows:,} TIRs")
+    log(f"feature matrix: {rows:,} x {columns:,}")
 
     joblib.dump(tfidf_word, MODEL_DIR / "tfidf_word.pkl")
     joblib.dump(tfidf_char, MODEL_DIR / "tfidf_char.pkl")
@@ -526,30 +624,57 @@ def main():
     # Trains one set of classifiers per target, on the rows that target can
     # use.  A row missing this label carries -1 and is skipped here, while
     # still contributing to any other target it does have.
-    for target, spec in TARGETS.items():
+    say()
+    say("Step 3 of 3   Learning to code each field")
+    summary = []
+
+    for position, (target, spec) in enumerate(TARGETS.items(), start=1):
         col = f"label_{target}"
         tr_rows = train_df[col].to_numpy() >= 0
         va_rows = val_df[col].to_numpy() >= 0
         num_labels = len(label_maps[target])
 
-        info(f"Training {target}: {int(tr_rows.sum()):,} rows, {num_labels} categories")
+        say()
+        say(f"  [{position} of {len(TARGETS)}]  {target_title(target)}")
+        say(f"            {num_labels} categories, learned from "
+            f"{int(tr_rows.sum()):,} coded TIRs")
+        log(f"Training {target}: {int(tr_rows.sum()):,} rows, {num_labels} categories")
 
         if spec.get("parent"):
-            train_hierarchical(
+            score = train_hierarchical(
                 target, spec, label_maps, hierarchy,
                 train_df, val_df, X_train, X_val,
             )
-            continue
+        else:
+            models, report = gate_models(
+                target,
+                X_train[tr_rows], train_df.loc[tr_rows, col].astype(int).to_numpy(),
+                X_val[va_rows], val_df.loc[va_rows, col].astype(int).to_numpy(),
+                num_labels,
+            )
+            save_models(MODEL_DIR / target, models, report)
+            score = max(report.get(n, 0.0) for n in models)
 
-        models, report = gate_models(
-            target,
-            X_train[tr_rows], train_df.loc[tr_rows, col].astype(int).to_numpy(),
-            X_val[va_rows], val_df.loc[va_rows, col].astype(int).to_numpy(),
-            num_labels,
-        )
-        save_models(MODEL_DIR / target, models, report)
+        summary.append((target_title(target), num_labels, score))
 
-    info("Training complete.")
+    minutes = (time.time() - started) / 60
+    say()
+    say("=" * 70)
+    say(f"  Finished in {minutes:.0f} minute(s)")
+    say("=" * 70)
+    say()
+    for title, categories, score in summary:
+        say(f"  {title:<16}{categories:>5} categories    score {score_of(score)}")
+    say()
+    say("  The score is out of 100 and counts every category equally, so a")
+    say("  category the team codes daily and one they code twice a year weigh")
+    say("  the same. It is deliberately harsher than \"percent correct\" —")
+    say("  reports/benchmark.md gives that, and what it means for coder time.")
+    say()
+    say("  The models are saved. To use them:")
+    say("      streamlit run src/app.py")
+    say()
+    log("Training complete.")
 
 
 if __name__ == "__main__":
