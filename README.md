@@ -111,6 +111,7 @@ The repository root holds the source exports and briefing material; the project
 itself lives in `TIR_Production/`.
 
 For what each file does and how it works, see **[ARCHITECTURE.md](ARCHITECTURE.md)**.
+For reviewing the work, see **[PEER_REVIEW.md](PEER_REVIEW.md)**.
 
 ```
 .gitignore
@@ -120,6 +121,7 @@ QPS Pull Jan 2023 - Dec 2025 ....xlsx            Main training export
 TIR Export Example1.xlsx                         Smaller export, largely a subset
 SY4.0_AIML_TIR_TechNav_aRosenbloom.pdf           Project quad chart
 ARCHITECTURE.md                                  What each file does and how it works
+PEER_REVIEW.md                                   How to review this work efficiently
 
 TIR_Production/
   config/config.json           Targets, column aliases, thresholds, model comparison
