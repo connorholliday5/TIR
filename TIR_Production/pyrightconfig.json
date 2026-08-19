@@ -2,7 +2,7 @@
     "include": ["src", "test"],
     "exclude": ["**/__pycache__", "data", "models", "reports", ".venv"],
     "typeCheckingMode": "standard",
-    "pythonVersion": "3.11",
+    "pythonVersion": "3.12",
     "extraPaths": ["."],
 
     "//": "pandas, scipy, sklearn, xgboost and streamlit ship no type stubs, or",
