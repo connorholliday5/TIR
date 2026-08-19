@@ -17,7 +17,7 @@ import pandas as pd
 import xgboost as xgb
 from sklearn.calibration import CalibratedClassifierCV
 from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.linear_model import LogisticRegression
+from sklearn.linear_model import LogisticRegression, SGDClassifier
 from sklearn.metrics import f1_score
 from sklearn.svm import LinearSVC
 
@@ -182,8 +182,6 @@ def gate_models(target, X_train, y_train, X_val, y_val, num_labels) -> Tuple[dic
     """
     report: Dict[str, float] = {}
 
-    # The challengers are screened on a capped sample; the SVM that ships is
-    # fitted on every labelled row.
     if not GATE_ENABLED:
         svm_only = fit_svm(X_train, y_train)
         if svm_only is None:
@@ -208,9 +206,27 @@ def gate_models(target, X_train, y_train, X_val, y_val, num_labels) -> Tuple[dic
     report["svm"] = baseline
     info(f"  {target}: calibrated SVM macro-F1 {baseline:.4f} (baseline)")
 
-    # Three unrelated estimator types share this dict; each is scored
+    # Several unrelated estimator types share this dict; each is scored
     # through its own branch in save_models and src.inference.
     kept: Dict[str, Any] = {"svm": svm_model}
+
+    info(f"  {target}: SGD (modified huber)…")
+    # `modified_huber` rather than the default hinge: it is the loss that gives
+    # SGDClassifier a predict_proba, and the blend needs probabilities from
+    # every member or the weighted sum stops being one.  It also reaches a
+    # different optimum than LinearSVC despite both being linear — a smooth
+    # loss with early stopping against a hinge fitted to convergence — which is
+    # the point of carrying it as a separate candidate rather than a duplicate.
+    sgd_model = SGDClassifier(
+        loss="modified_huber",
+        class_weight="balanced",
+        early_stopping=True,
+        n_iter_no_change=5,
+        max_iter=2000,
+        random_state=SEED,
+    )
+    sgd_model.fit(Xg, yg)
+    report["sgd"] = macro_f1(sgd_model, X_val, y_val)
 
     info(f"  {target}: Logistic Regression…")
     lr_model = LogisticRegression(max_iter=2500, solver="lbfgs", C=1.5, class_weight="balanced")
@@ -243,7 +259,7 @@ def gate_models(target, X_train, y_train, X_val, y_val, num_labels) -> Tuple[dic
         f1_score(y_val, xgb_pred, average="macro", zero_division=0)  # type: ignore[arg-type]
     )
 
-    for name, model in (("lr", lr_model), ("xgb", booster)):
+    for name, model in (("sgd", sgd_model), ("lr", lr_model), ("xgb", booster)):
         if report[name] > baseline:
             kept[name] = model
             info(f"  {target}: keeping {name} (macro-F1 {report[name]:.4f} > {baseline:.4f})")
