@@ -2,6 +2,9 @@
 # -*- coding: utf-8 -*-
 
 # Module: src.data
+# Implements:
+#   - REQ-002 (Text cleaning)
+#   - REQ-011 (Input validation)
 # Reading a raw QPS export: recognising its columns whatever they are called,
 # and turning them into the single text field the models are trained on.
 

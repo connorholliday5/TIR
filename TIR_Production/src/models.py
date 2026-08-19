@@ -2,6 +2,9 @@
 # -*- coding: utf-8 -*-
 
 # Module: src.models
+# Implements:
+#   - REQ-010 (Feature matrix construction)
+#   - REQ-012 (Model integrity verification)
 # Feature construction, the arithmetic that turns model outputs into one
 # answer per row, and artifact integrity checks.
 

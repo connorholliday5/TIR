@@ -2,6 +2,8 @@
 # -*- coding: utf-8 -*-
 
 # Module: src.config
+# Implements:
+#   - REQ-001 (Project-wide path constants)
 # Project paths and the settings every other module reads.
 #
 # config.json used to be parsed independently by preprocessing, training,
