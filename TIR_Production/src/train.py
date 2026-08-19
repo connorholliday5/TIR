@@ -160,9 +160,17 @@ def macro_f1(model, X, y) -> float:
     """
     if model is None or len(y) == 0:
         return 0.0
+
+    # A Booster predicts from its own matrix type and returns one probability
+    # per class rather than a label, unlike every scikit-learn estimator here.
+    if isinstance(model, xgb.Booster):
+        predicted = model.predict(xgb.QuantileDMatrix(X)).argmax(axis=1)
+    else:
+        predicted = model.predict(X)
+
     # sklearn documents zero_division=0 as valid but annotates it as str.
     return float(
-        f1_score(y, model.predict(X), average="macro", zero_division=0)  # type: ignore[arg-type]
+        f1_score(y, predicted, average="macro", zero_division=0)  # type: ignore[arg-type]
     )
 
 
@@ -210,56 +218,80 @@ def gate_models(target, X_train, y_train, X_val, y_val, num_labels) -> Tuple[dic
     # through its own branch in save_models and src.inference.
     kept: Dict[str, Any] = {"svm": svm_model}
 
-    info(f"  {target}: SGD (modified huber)…")
+    # Each challenger is fitted inside `try_challenger` so one failing costs
+    # its own result rather than the whole run, and so a score is reported the
+    # moment it is known rather than at the decision below — an earlier run was
+    # killed part way through and threw away two measurements it had already
+    # finished paying for.
+    #
+    # This catches a Python-level failure only.  A process killed by the kernel
+    # for exhausting its memory cgroup receives SIGKILL and can catch nothing,
+    # which is why the boosting matrices below are built as QuantileDMatrix
+    # rather than left to take whatever memory they ask for.
+    def try_challenger(name: str, fit):
+        info(f"  {target}: {name}…")
+        try:
+            model = fit()
+        except Exception as exc:
+            info(f"  ⚠ {target}: {name} could not be fitted ({type(exc).__name__}: {exc})")
+            report[name] = float("nan")
+            return None
+        report[name] = macro_f1(model, X_val, y_val)
+        info(f"  {target}: {name} macro-F1 {report[name]:.4f}")
+        return model
+
     # `modified_huber` rather than the default hinge: it is the loss that gives
     # SGDClassifier a predict_proba, and the blend needs probabilities from
     # every member or the weighted sum stops being one.  It also reaches a
     # different optimum than LinearSVC despite both being linear — a smooth
     # loss with early stopping against a hinge fitted to convergence — which is
     # the point of carrying it as a separate candidate rather than a duplicate.
-    sgd_model = SGDClassifier(
+    sgd_model = try_challenger("SGD (modified huber)", lambda: SGDClassifier(
         loss="modified_huber",
         class_weight="balanced",
         early_stopping=True,
         n_iter_no_change=5,
         max_iter=2000,
         random_state=SEED,
-    )
-    sgd_model.fit(Xg, yg)
-    report["sgd"] = macro_f1(sgd_model, X_val, y_val)
+    ).fit(Xg, yg))
 
-    info(f"  {target}: Logistic Regression…")
-    lr_model = LogisticRegression(max_iter=2500, solver="lbfgs", C=1.5, class_weight="balanced")
-    lr_model.fit(Xg, yg)
-    report["lr"] = macro_f1(lr_model, X_val, y_val)
+    lr_model = try_challenger("Logistic Regression", lambda: LogisticRegression(
+        max_iter=2500, solver="lbfgs", C=1.5, class_weight="balanced",
+    ).fit(Xg, yg))
 
-    info(f"  {target}: XGBoost…")
-    params = {
-        "objective": "multi:softprob",
-        "num_class": num_labels,
-        "max_depth": 6,
-        "learning_rate": 0.12,
-        "eval_metric": "mlogloss",
-        "subsample": 0.9,
-        "colsample_bytree": 0.9,
-        "tree_method": "hist",
-        "reg_lambda": 1.0,
-        "random_state": SEED,
-    }
-    booster = xgb.train(
-        params,
-        xgb.DMatrix(Xg, label=yg),
-        num_boost_round=GATE_BOOST_ROUNDS,
-        evals=[(xgb.DMatrix(X_val, label=y_val), "val")],
-        early_stopping_rounds=GATE_EARLY_STOPPING,
-        verbose_eval=False,
-    )
-    xgb_pred = booster.predict(xgb.DMatrix(X_val)).argmax(axis=1)
-    report["xgb"] = float(
-        f1_score(y_val, xgb_pred, average="macro", zero_division=0)  # type: ignore[arg-type]
-    )
+    def fit_booster():
+        params = {
+            "objective": "multi:softprob",
+            "num_class": num_labels,
+            "max_depth": 6,
+            "learning_rate": 0.12,
+            "eval_metric": "mlogloss",
+            "subsample": 0.9,
+            "colsample_bytree": 0.9,
+            "tree_method": "hist",
+            "reg_lambda": 1.0,
+            "random_state": SEED,
+        }
+        # QuantileDMatrix bins each feature as it reads it rather than
+        # materialising a second full copy of the matrix.  A plain DMatrix over
+        # 65,718 rows by 183,633 columns reached 13.5 GB here and the run was
+        # killed outright.
+        train_matrix = xgb.QuantileDMatrix(Xg, label=yg)
+        val_matrix = xgb.QuantileDMatrix(X_val, label=y_val, ref=train_matrix)
+        return xgb.train(
+            params,
+            train_matrix,
+            num_boost_round=GATE_BOOST_ROUNDS,
+            evals=[(val_matrix, "val")],
+            early_stopping_rounds=GATE_EARLY_STOPPING,
+            verbose_eval=False,
+        )
+
+    booster = try_challenger("XGBoost", fit_booster)
 
     for name, model in (("sgd", sgd_model), ("lr", lr_model), ("xgb", booster)):
+        if model is None:
+            continue
         if report[name] > baseline:
             kept[name] = model
             info(f"  {target}: keeping {name} (macro-F1 {report[name]:.4f} > {baseline:.4f})")
