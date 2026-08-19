@@ -52,27 +52,25 @@ SHARED_ARTIFACTS = ["tfidf_word.pkl", "tfidf_char.pkl"]
 # almost nothing.
 MIN_PARENT_ROWS = 10
 
-# Budget for the screening run that decides whether boosting or logistic
-# regression earn a place beside the linear SVM.
+# Whether logistic regression and boosting are trained alongside the linear SVM
+# and kept where they beat it on validation macro-F1.
 #
-# It is bounded deliberately.  Boosting builds one tree per category per round,
-# and over a 180,000-column TF-IDF matrix the seven-category target alone ran
-# past six minutes at 350 rounds — the twenty-seven category one would take
-# hours, on a pipeline that has to be retrained whenever corrections
-# accumulate.  The question the gate asks is therefore not "could this family
-# win eventually" but "does it beat a calibrated linear SVM at a comparable
-# cost", which is the question that decides what ships.  Raise these to give
-# the challengers a longer run.
-# Screening the challenger families is off by default.  Measured on a held-out
-# split, the calibrated linear SVM matched the full three-model ensemble, while
-# boosting over a 180,000-column TF-IDF matrix took longer than everything else
-# in the pipeline combined — so paying for that comparison on every retrain buys
-# a result already recorded in reports/benchmark.md.  Turn it on with
-# `--gate`, or `"gate": {"enabled": true}`, when the comparison is wanted again.
-GATE_ENABLED = bool(GATE.get("enabled", False))
-GATE_BOOST_ROUNDS = int(GATE.get("max_boost_rounds", 120))
-GATE_EARLY_STOPPING = int(GATE.get("early_stopping_rounds", 20))
-GATE_MAX_ROWS = int(GATE.get("max_rows", 25_000))
+# They are given the whole training set and the boosting rounds the model was
+# configured with, so the comparison answers "is this family better" rather
+# than "is it better on a budget".  That is expensive — boosting builds one
+# tree per category per round over a 180,000-column matrix, and the
+# twenty-seven category target runs for hours — and it is worth it, because a
+# cheap screen can only ever hint at the answer.
+#
+# Macro-F1 rather than accuracy decides it: accuracy on this data sits at the
+# limit of how consistently people code it, so any gain a second model has to
+# offer is in the rare categories, which only the macro average sees.
+#
+# Set max_rows above zero to screen on a sample instead; zero uses every row.
+GATE_ENABLED = bool(GATE.get("enabled", True))
+GATE_BOOST_ROUNDS = int(GATE.get("max_boost_rounds", 350))
+GATE_EARLY_STOPPING = int(GATE.get("early_stopping_rounds", 50))
+GATE_MAX_ROWS = int(GATE.get("max_rows", 0))
 
 
 # Removes old model artifacts before training.
@@ -194,7 +192,7 @@ def gate_models(target, X_train, y_train, X_val, y_val, num_labels) -> Tuple[dic
         info(f"  {target}: calibrated SVM macro-F1 {score:.4f} (challengers not screened)")
         return {"svm": svm_only}, {"svm": score}
 
-    if len(y_train) > GATE_MAX_ROWS:
+    if GATE_MAX_ROWS and len(y_train) > GATE_MAX_ROWS:
         rng = np.random.default_rng(SEED)
         sample = rng.choice(len(y_train), GATE_MAX_ROWS, replace=False)
         Xg, yg = X_train[sample], np.asarray(y_train)[sample]
@@ -215,7 +213,7 @@ def gate_models(target, X_train, y_train, X_val, y_val, num_labels) -> Tuple[dic
     kept: Dict[str, Any] = {"svm": svm_model}
 
     info(f"  {target}: Logistic Regression…")
-    lr_model = LogisticRegression(max_iter=1000, solver="lbfgs", C=1.5, class_weight="balanced")
+    lr_model = LogisticRegression(max_iter=2500, solver="lbfgs", C=1.5, class_weight="balanced")
     lr_model.fit(Xg, yg)
     report["lr"] = macro_f1(lr_model, X_val, y_val)
 
@@ -377,14 +375,15 @@ def train_hierarchical(
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument(
-        "--gate", action="store_true",
-        help="Also fit logistic regression and boosting, and keep either only "
-             "if it beats the calibrated SVM on validation macro-F1.",
+        "--no-gate", action="store_true",
+        help="Ship the calibrated SVM alone without training the challengers. "
+             "Otherwise all three are fitted and the best-scoring are kept.",
     )
     args = parser.parse_args()
 
     global GATE_ENABLED
-    GATE_ENABLED = GATE_ENABLED or args.gate
+    if args.no_gate:
+        GATE_ENABLED = False
 
     info("Starting training…")
 

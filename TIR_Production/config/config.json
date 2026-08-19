@@ -163,9 +163,9 @@
     "other": "OTHER"
   },
   "gate": {
-    "enabled": false,
-    "max_boost_rounds": 120,
-    "early_stopping_rounds": 20,
-    "max_rows": 25000
+    "enabled": true,
+    "max_boost_rounds": 350,
+    "early_stopping_rounds": 50,
+    "max_rows": 0
   }
 }
