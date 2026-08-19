@@ -1,0 +1,21 @@
+{
+    "include": ["src", "test"],
+    "exclude": ["**/__pycache__", "data", "models", "reports", ".venv"],
+    "typeCheckingMode": "standard",
+    "pythonVersion": "3.11",
+    "extraPaths": ["."],
+
+    "//": "pandas, scipy, sklearn, xgboost and streamlit ship no type stubs, or",
+    "//2": "stubs that disagree with their documented behaviour — sklearn types",
+    "//3": "zero_division as str, scipy declares csr_matrix.shape optional.  We",
+    "//4": "report genuine problems in our own code and stay quiet about theirs.",
+    "reportMissingTypeStubs": false,
+    "reportMissingModuleSource": false,
+    "reportUnknownMemberType": false,
+    "reportUnknownArgumentType": false,
+    "reportUnknownVariableType": false,
+    "reportUnknownParameterType": false,
+    "reportUnknownLambdaType": false,
+    "reportMissingParameterType": false,
+    "reportPrivateImportUsage": false
+}

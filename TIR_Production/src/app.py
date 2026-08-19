@@ -14,38 +14,24 @@ from pathlib import Path
 # the `src` package, so the repository root is not on sys.path and the imports
 # below would fail with "ModuleNotFoundError: No module named 'src'".  This has
 # to run before any project import.
-_HERE = Path(__file__).resolve().parent
-for _candidate in (_HERE.parent, _HERE):
-    if str(_candidate) not in sys.path:
-        sys.path.insert(0, str(_candidate))
+_ROOT = Path(__file__).resolve().parent.parent
+if str(_ROOT) not in sys.path:
+    sys.path.insert(0, str(_ROOT))
 
 from datetime import datetime
-
 import pandas as pd
 import streamlit as st
 
-try:  # modules under src/
-    from src.config import (
-        FEEDBACK_CFG, FEEDBACK_PATH, PRIMARY_TARGET, REQUIRED_COLS, ROOT,
-        TARGETS, TEXT_COLS, heading, target_title,
-    )
-    from src.data import build_text_series, canonicalize, validate_input_dataframe
-    from src.export import DETAIL_FIELDS, filename, to_workbook
-    from src.feedback import (
-        DEFAULT_SIMILARITY_THRESHOLD, append_feedback, latest_corrections, load_feedback,
-    )
-    from src.inference import classify, load_bundle
-except ImportError:  # flat layout, modules at the repository root
-    from config import (
-        FEEDBACK_CFG, FEEDBACK_PATH, PRIMARY_TARGET, REQUIRED_COLS, ROOT,
-        TARGETS, TEXT_COLS, heading, target_title,
-    )
-    from data import build_text_series, canonicalize, validate_input_dataframe
-    from export import DETAIL_FIELDS, filename, to_workbook
-    from feedback import (
-        DEFAULT_SIMILARITY_THRESHOLD, append_feedback, latest_corrections, load_feedback,
-    )
-    from inference import classify, load_bundle
+from src.config import (
+    FEEDBACK_CFG, FEEDBACK_PATH, PRIMARY_TARGET, REQUIRED_COLS, ROOT,
+    TARGETS, TEXT_COLS, heading, target_title,
+)
+from src.data import build_text_series, canonicalize, validate_input_dataframe
+from src.export import DETAIL_FIELDS, filename, to_workbook
+from src.feedback import (
+    DEFAULT_SIMILARITY_THRESHOLD, append_feedback, latest_corrections, load_feedback,
+)
+from src.inference import classify, load_bundle
 
 
 FEEDBACK_ENABLED = FEEDBACK_CFG.get("enabled", False)

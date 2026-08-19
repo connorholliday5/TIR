@@ -5,19 +5,12 @@
 # Exposes the classifier over HTTP.
 
 from typing import Optional
-
 from fastapi import FastAPI
 from pydantic import BaseModel
 
-try:  # modules under src/
-    from src.config import TEXT_COLS
-    from src.data import build_text_series, clean_text, is_blank_text
-    from src.inference import classify, load_bundle
-except ImportError:  # flat layout, modules at the repository root
-    from config import TEXT_COLS
-    from data import build_text_series, clean_text, is_blank_text
-    from inference import classify, load_bundle
-
+from src.config import TEXT_COLS
+from src.data import build_text_series, clean_text, is_blank_text
+from src.inference import classify, load_bundle
 import pandas as pd
 
 

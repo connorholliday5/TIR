@@ -8,7 +8,6 @@
 import hashlib
 from pathlib import Path
 from typing import Any, Dict, Sequence, Tuple, cast
-
 import numpy as np
 from scipy.sparse import csr_matrix, hstack, vstack
 

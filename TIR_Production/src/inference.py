@@ -10,32 +10,20 @@
 
 import json
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence
-
+from typing import Dict, List, Mapping, Optional, Sequence
 import joblib
 import numpy as np
 import pandas as pd
 
-try:  # modules under src/
-    from src.config import (
-        CONFIG, DATA_DIR, MODEL_DIR, PRIMARY_TARGET, TARGETS,
-        review_threshold, target_title,
-    )
-    from src.data import is_blank_text
-    from src.models import (
-        build_features, ensemble_score_matrix, expand_proba,
-        top_k_from_scores, verify_model_hash,
-    )
-except ImportError:  # flat layout, modules at the repository root
-    from config import (
-        CONFIG, DATA_DIR, MODEL_DIR, PRIMARY_TARGET, TARGETS,
-        review_threshold, target_title,
-    )
-    from data import is_blank_text
-    from models import (
-        build_features, ensemble_score_matrix, expand_proba,
-        top_k_from_scores, verify_model_hash,
-    )
+from src.config import (
+    CONFIG, DATA_DIR, MODEL_DIR, PRIMARY_TARGET, TARGETS,
+    review_threshold, target_title,
+)
+from src.data import is_blank_text
+from src.models import (
+    build_features, ensemble_score_matrix, expand_proba,
+    top_k_from_scores, verify_model_hash,
+)
 
 
 # Loads the models saved for one directory, honouring its ensemble.json.
@@ -144,7 +132,7 @@ def load_bundle(model_dir: Path = MODEL_DIR, data_dir: Path = DATA_DIR) -> dict:
 
 # Predicts a child target inside whichever parent each row was assigned.
 def _predict_child(
-    entry: dict, parent_labels: Sequence[str], parent_name2id: Dict[str, int], X
+    entry: dict, parent_labels: Sequence[str], parent_name2id: Mapping[str, int], X
 ) -> dict:
     """Return per-row label, confidence, source and ranked alternates.
 
@@ -216,7 +204,7 @@ def _predict_child(
 def classify(
     texts: Sequence[str],
     bundle: dict,
-    overrides: Optional[Dict[str, Sequence[str]]] = None,
+    overrides: Optional[Mapping[str, Sequence[str]]] = None,
 ) -> pd.DataFrame:
     """Return one row per text with a prediction column set per target.
 

@@ -9,32 +9,18 @@ import json
 import argparse
 from pathlib import Path
 from typing import Dict, List, cast
-
 import pandas as pd
 from sklearn.model_selection import train_test_split
 
-try:  # modules under src/
-    from src.config import (
-        ALIASES, CONFIG, CONFIG_PATH, HIERARCHY_PATH, PRIMARY_TARGET, PROC_DIR,
-        RAW_DIR, REQUIRED_COLS, ROOT, SEED, TARGETS, TEXT_COLS,
-        label_map_path, validate_target_order,
-    )
-    from src.data import (
-        build_text_series, canonicalize, normalize_categories, resolve_columns,
-        validate_input_dataframe,
-    )
-except ImportError:  # flat layout, modules at the repository root
-    from config import (
-        ALIASES, CONFIG, CONFIG_PATH, HIERARCHY_PATH, PRIMARY_TARGET, PROC_DIR,
-        RAW_DIR, REQUIRED_COLS, ROOT, SEED, TARGETS, TEXT_COLS,
-        label_map_path, validate_target_order,
-    )
-    from data import (
-        build_text_series, canonicalize, normalize_categories, resolve_columns,
-        validate_input_dataframe,
-    )
-
-
+from src.config import (
+    ALIASES, CONFIG, CONFIG_PATH, HIERARCHY_PATH, PRIMARY_TARGET, PROC_DIR,
+    RAW_DIR, REQUIRED_COLS, ROOT, SEED, TARGETS, TEXT_COLS,
+    label_map_path, validate_target_order,
+)
+from src.data import (
+    build_text_series, canonicalize, normalize_categories, resolve_columns,
+    validate_input_dataframe,
+)
 # Loads the normalisation table a target refers to, if any.
 def normalization_for(spec: dict) -> dict:
     """Return the lower-case -> standard-form map named by `spec`.
@@ -185,11 +171,10 @@ def build_hierarchy(df: pd.DataFrame, label_maps: Dict[str, dict]) -> dict:
         parent_names = {int(k): v["name"] for k, v in label_maps[parent].items()}
 
         usable = df[(df[f"label_{target}"] >= 0) & (df[f"label_{parent}"] >= 0)]
-        pairs = (
-            usable[[f"label_{parent}", f"label_{target}"]]
-            .drop_duplicates()
-            .itertuples(index=False, name=None)
+        columns = cast(
+            pd.DataFrame, usable[[f"label_{parent}", f"label_{target}"]]
         )
+        pairs = columns.drop_duplicates().itertuples(index=False, name=None)
 
         table: Dict[str, List[str]] = {}
         for parent_id, child_id in pairs:

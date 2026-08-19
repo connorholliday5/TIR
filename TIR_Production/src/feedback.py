@@ -21,20 +21,13 @@
 
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import List, Optional, Sequence, Tuple, cast
-
+from typing import Any, List, Optional, Sequence, Tuple, cast
 import numpy as np
 import pandas as pd
 from sklearn.preprocessing import normalize
 
-try:
-    from src.data import clean_text
-    from src.models import build_features
-except ImportError:
-    from data import clean_text
-    from models import build_features
-
-
+from src.data import clean_text
+from src.models import build_features
 FEEDBACK_COLUMNS = ["timestamp", "target", "text", "predicted", "corrected"]
 
 # Cosine similarity required before a stored correction is reused.
@@ -174,7 +167,7 @@ class CorrectionIndex:
         if self.texts and tfidf_word is not None and self.threshold <= 1.0:
             # Rows are unit-normalised once, so a lookup is a single sparse
             # dot product rather than a similarity computed per candidate.
-            self._matrix = normalize(build_features(self.texts, tfidf_word, tfidf_char))
+            self._matrix = cast(Any, normalize(build_features(self.texts, tfidf_word, tfidf_char)))
 
     # Finds the reviewer's answer for a text, if there is one.
     def lookup(self, text: str) -> Tuple[Optional[str], float]:
@@ -191,7 +184,9 @@ class CorrectionIndex:
         if self._matrix is None or self.threshold > 1.0:
             return None, 0.0
 
-        vector = normalize(build_features([cleaned], self.tfidf_word, self.tfidf_char))
+        # normalize() is overloaded to return a (matrix, norms) tuple when
+        # return_norm is set; with the default it returns the matrix alone.
+        vector = cast(Any, normalize(build_features([cleaned], self.tfidf_word, self.tfidf_char)))
         # A text sharing no feature with anything stored embeds to all zeros,
         # which scores 0 against every row and cannot be anyone's match.
         similarities = (self._matrix @ vector.T).toarray().ravel()

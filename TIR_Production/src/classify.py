@@ -9,26 +9,16 @@ import argparse
 import json
 from pathlib import Path
 from typing import cast
-
 import pandas as pd
 from sklearn.metrics import accuracy_score, classification_report, f1_score
 
-try:  # modules under src/
-    from src.config import (
-        CONFIG, DATA_DIR, MODEL_DIR, REQUIRED_COLS, TARGETS, TEXT_COLS, target_title,
-    )
-    from src.data import (
-        build_text_series, canonicalize, normalize_categories, validate_input_dataframe,
-    )
-    from src.inference import classify, load_bundle
-except ImportError:  # flat layout, modules at the repository root
-    from config import (
-        CONFIG, DATA_DIR, MODEL_DIR, REQUIRED_COLS, TARGETS, TEXT_COLS, target_title,
-    )
-    from data import (
-        build_text_series, canonicalize, normalize_categories, validate_input_dataframe,
-    )
-    from inference import classify, load_bundle
+from src.config import (
+    CONFIG, DATA_DIR, MODEL_DIR, REQUIRED_COLS, TARGETS, TEXT_COLS, target_title,
+)
+from src.data import (
+    build_text_series, canonicalize, normalize_categories, validate_input_dataframe,
+)
+from src.inference import classify, load_bundle
 
 
 # Reports how well one target did against the file's own labels.
@@ -55,7 +45,8 @@ def report_target(df: pd.DataFrame, target: str, spec: dict) -> None:
     y_true, y_pred = truth[known], predicted[known]
     print(f"\n=== {target} ({target_title(target)}) — {int(known.sum()):,} labelled rows ===")
     print(f"Accuracy : {accuracy_score(y_true, y_pred):.4f}")
-    print(f"Macro-F1 : {f1_score(y_true, y_pred, average='macro', zero_division=0):.4f}\n")
+    macro = f1_score(y_true, y_pred, average="macro", zero_division=0)  # type: ignore[arg-type]
+    print(f"Macro-F1 : {macro:.4f}\n")
     # zero_division=0 reports a category the models never predicted as 0.0
     # rather than warning.  sklearn documents 0 as valid but annotates the
     # parameter as str, hence the ignore.

@@ -7,13 +7,10 @@
 import io
 from datetime import datetime
 from typing import Dict, List, Sequence
-
 import pandas as pd
 
-try:  # modules under src/
-    from src.config import TARGETS, heading
-except ImportError:  # flat layout, modules at the repository root
-    from config import TARGETS, heading
+from src.config import TARGETS, heading
+
 
 # The identifying fields a coder can type alongside the description, in the
 # order they belong in the sheet.

@@ -7,14 +7,10 @@
 
 import re
 from pathlib import Path
-from typing import Dict, List, Sequence, cast
-
+from typing import Dict, List, Mapping, Optional, Sequence, cast
 import pandas as pd
 
-try:
-    from src.config import ALIASES
-except ImportError:
-    from config import ALIASES
+from src.config import ALIASES
 
 
 # -- column recognition ------------------------------------------------------
@@ -40,7 +36,9 @@ def _key(name: str) -> str:
 
 
 # Finds the actual column backing each canonical name.
-def resolve_columns(df: pd.DataFrame, aliases: Dict[str, Sequence[str]] = None) -> Dict[str, str]:
+def resolve_columns(
+    df: pd.DataFrame, aliases: Optional[Mapping[str, Sequence[str]]] = None
+) -> Dict[str, str]:
     """Return {canonical name: the column of `df` that holds it}.
 
     Canonical names the frame does not carry are simply absent from the
@@ -67,7 +65,9 @@ def resolve_columns(df: pd.DataFrame, aliases: Dict[str, Sequence[str]] = None) 
 
 
 # Renames a raw export's columns to the canonical names.
-def canonicalize(df: pd.DataFrame, aliases: Dict[str, Sequence[str]] = None) -> pd.DataFrame:
+def canonicalize(
+    df: pd.DataFrame, aliases: Optional[Mapping[str, Sequence[str]]] = None
+) -> pd.DataFrame:
     """Return a copy of `df` with recognised columns renamed to canonical form.
 
     Columns no alias claims are left exactly as they were, so an uploaded file
@@ -92,7 +92,9 @@ def canonicalize(df: pd.DataFrame, aliases: Dict[str, Sequence[str]] = None) -> 
 
 # Names the canonical fields an export is missing.
 def missing_columns(
-    df: pd.DataFrame, required: Sequence[str], aliases: Dict[str, Sequence[str]] = None
+    df: pd.DataFrame,
+    required: Sequence[str],
+    aliases: Optional[Mapping[str, Sequence[str]]] = None,
 ) -> List[str]:
     """Return the required canonical names that `df` cannot supply."""
     aliases = ALIASES if aliases is None else aliases

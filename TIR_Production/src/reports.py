@@ -14,26 +14,17 @@
 import argparse
 import json
 from pathlib import Path
-from typing import Dict, List
-
+from typing import Dict, List, cast
 import numpy as np
 import pandas as pd
 from sklearn.metrics import accuracy_score, f1_score
 
-try:  # modules under src/
-    from src.config import (
-        ALIASES, MODEL_DIR, PROC_DIR, REPORT_DIR, ROOT, TARGETS, TEXT_COLS,
-        review_threshold,
-    )
-    from src.data import build_text_series, canonicalize, resolve_columns
-    from src.inference import classify, load_bundle
-except ImportError:  # flat layout, modules at the repository root
-    from config import (
-        ALIASES, MODEL_DIR, PROC_DIR, REPORT_DIR, ROOT, TARGETS, TEXT_COLS,
-        review_threshold,
-    )
-    from data import build_text_series, canonicalize, resolve_columns
-    from inference import classify, load_bundle
+from src.config import (
+    ALIASES, MODEL_DIR, PROC_DIR, REPORT_DIR, ROOT, TARGETS, TEXT_COLS,
+    review_threshold,
+)
+from src.data import build_text_series, canonicalize, resolve_columns
+from src.inference import classify, load_bundle
 
 
 # A field is called sufficient when coders agree with each other at least this
@@ -76,26 +67,33 @@ def consistency(df: pd.DataFrame, column: str) -> dict:
     Description 2 — so some of what is counted here as disagreement is two
     coders correctly coding two different things.
     """
-    usable = df[df[column].notna() & (df[column].astype(str).str.strip() != "")]
+    usable = cast(pd.DataFrame, df[df[column].notna() & (df[column].astype(str).str.strip() != "")])
     empty = {"groups": 0, "rows": 0, "conflicting": 0, "agreement": float("nan")}
     if usable.empty:
         return empty
 
-    sizes = usable.groupby("repeat_key")[column].size()
-    repeated = sizes[sizes > 1].index
+    # pandas-stubs types size() and value_counts() as ndarray; both return a
+    # Series here, and the code below relies on its index.
+    sizes = cast(pd.Series, usable.groupby("repeat_key")[column].size())
+    repeated = cast(pd.Series, sizes[sizes > 1]).index
     if len(repeated) == 0:
         return empty
 
-    subset = usable[usable["repeat_key"].isin(repeated)]
+    keys = cast(pd.Series, usable["repeat_key"])
+    subset = cast(pd.DataFrame, usable[keys.isin(pd.Series(repeated))])
     per_text = subset.groupby("repeat_key")[column]
-    majority = per_text.agg(lambda s: s.mode().iloc[0])
+
+    # transform broadcasts each group's most common code back onto its own
+    # rows, so the comparison below is row-against-its-own-majority without
+    # having to build and re-join a lookup.
+    majority_per_row = per_text.transform(lambda s: s.mode().iloc[0])
 
     return {
         "groups": int(len(repeated)),
         "rows": int(len(subset)),
         "conflicting": int((per_text.nunique() > 1).sum()),
         "agreement": float(
-            (subset[column].values == subset["repeat_key"].map(majority).values).mean()
+            np.mean(np.asarray(subset[column]) == np.asarray(majority_per_row))
         ),
     }
 
@@ -316,14 +314,18 @@ def build_benchmark(split: str, out: Path) -> None:
         if not judged.any():
             continue
 
-        y_true, y_pred = truth[judged], preds.loc[judged, f"pred_{target}"]
+        y_true = cast(pd.Series, truth[judged])
+        y_pred = cast(pd.Series, preds.loc[judged, f"pred_{target}"])
         summary[target] = {
             "correct": (y_true.to_numpy() == y_pred.to_numpy()),
             "confidence": preds.loc[judged, f"confidence_{target}"].to_numpy(),
         }
         lines.append(
             f"| {target} | {int(judged.sum()):,} | {accuracy_score(y_true, y_pred):.4f} | "
-            f"{f1_score(y_true, y_pred, average='macro', zero_division=0):.4f} |"
+            # zero_division=0 reports a category the models never predicted as
+            # 0.0 rather than warning.  sklearn documents 0 as valid but
+            # annotates the parameter as str, hence the ignore.
+            f"{f1_score(y_true, y_pred, average='macro', zero_division=0):.4f} |"  # type: ignore[arg-type]
         )
 
     lines += [

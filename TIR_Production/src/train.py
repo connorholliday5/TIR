@@ -10,8 +10,7 @@ import json
 import logging
 import warnings
 from pathlib import Path
-from typing import Dict, List, Tuple
-
+from typing import Any, Dict, List, Tuple, cast
 import joblib
 import numpy as np
 import pandas as pd
@@ -22,24 +21,13 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import f1_score
 from sklearn.svm import LinearSVC
 
-try:  # modules under src/
-    from src.config import (
-        CONFIG, CONFIG_PATH, DATA_DIR, FEEDBACK_PATH, GATE, HIERARCHY_PATH,
-        MODEL_DIR, PROC_DIR, ROOT, SEED, TARGETS, label_map_path,
-    )
-    from src.data import clean_text
-    from src.feedback import feedback_training_rows
-    from src.models import hstack_csr, write_hashes
-except ImportError:  # flat layout, modules at the repository root
-    from config import (
-        CONFIG, CONFIG_PATH, DATA_DIR, FEEDBACK_PATH, GATE, HIERARCHY_PATH,
-        MODEL_DIR, PROC_DIR, ROOT, SEED, TARGETS, label_map_path,
-    )
-    from data import clean_text
-    from feedback import feedback_training_rows
-    from models import hstack_csr, write_hashes
-
-
+from src.config import (
+    CONFIG, CONFIG_PATH, DATA_DIR, FEEDBACK_PATH, GATE, HIERARCHY_PATH,
+    MODEL_DIR, PROC_DIR, ROOT, SEED, TARGETS, label_map_path,
+)
+from src.data import clean_text
+from src.feedback import feedback_training_rows
+from src.models import hstack_csr, write_hashes
 # Configures logging for the training pipeline.
 logging.basicConfig(
     filename=ROOT / "train.log",
@@ -128,8 +116,10 @@ def fit_svm(X, y, seed: int = SEED):
     gained 0.9 macro-F1 at no cost to accuracy, and the rare categories are
     where the model is weakest.
     """
-    counts = pd.Series(y).value_counts()
-    keep_classes = counts[counts >= 2].index
+    # pandas-stubs types value_counts() as ndarray; it returns a Series, and
+    # the class labels are its index.
+    counts = cast(pd.Series, pd.Series(y).value_counts())
+    keep_classes = cast(pd.Series, counts[counts >= 2]).index
     if len(keep_classes) < 2:
         return None
 
@@ -172,7 +162,10 @@ def macro_f1(model, X, y) -> float:
     """
     if model is None or len(y) == 0:
         return 0.0
-    return float(f1_score(y, model.predict(X), average="macro", zero_division=0))
+    # sklearn documents zero_division=0 as valid but annotates it as str.
+    return float(
+        f1_score(y, model.predict(X), average="macro", zero_division=0)  # type: ignore[arg-type]
+    )
 
 
 # Decides which model families are worth keeping for a target.
@@ -217,7 +210,9 @@ def gate_models(target, X_train, y_train, X_val, y_val, num_labels) -> Tuple[dic
     report["svm"] = baseline
     info(f"  {target}: calibrated SVM macro-F1 {baseline:.4f} (baseline)")
 
-    kept = {"svm": svm_model}
+    # Three unrelated estimator types share this dict; each is scored
+    # through its own branch in save_models and src.inference.
+    kept: Dict[str, Any] = {"svm": svm_model}
 
     info(f"  {target}: Logistic Regression…")
     lr_model = LogisticRegression(max_iter=1000, solver="lbfgs", C=1.5, class_weight="balanced")
@@ -246,7 +241,9 @@ def gate_models(target, X_train, y_train, X_val, y_val, num_labels) -> Tuple[dic
         verbose_eval=False,
     )
     xgb_pred = booster.predict(xgb.DMatrix(X_val)).argmax(axis=1)
-    report["xgb"] = float(f1_score(y_val, xgb_pred, average="macro", zero_division=0))
+    report["xgb"] = float(
+        f1_score(y_val, xgb_pred, average="macro", zero_division=0)  # type: ignore[arg-type]
+    )
 
     for name, model in (("lr", lr_model), ("xgb", booster)):
         if report[name] > baseline:
@@ -463,7 +460,10 @@ def main():
         tfidf_word.transform(val_df["text"]),
         tfidf_char.transform(val_df["text"]),
     ])
-    info(f"  feature matrix: {X_train.shape[0]:,} x {X_train.shape[1]:,}")
+    # scipy annotates a sparse matrix's shape as optional; hstack_csr always
+    # returns a concrete two-dimensional CSR matrix.
+    rows, columns = cast(tuple, X_train.shape)
+    info(f"  feature matrix: {rows:,} x {columns:,}")
 
     joblib.dump(tfidf_word, MODEL_DIR / "tfidf_word.pkl")
     joblib.dump(tfidf_char, MODEL_DIR / "tfidf_char.pkl")
