@@ -1,231 +1,173 @@
+✅ Improvements You Should Make (Prioritized)
+HIGH PRIORITY (Correctness & Risk)
 
-# Peer Review Plan
 
-Companion to **Peer Review Checklist - Code Inspection.xls** (Rev 1, 2012-04-05).
+Reduce complexity in inference.classify and _predict_child
 
-That checklist was written for embedded C and Ada — it asks about null pointer
-dereferencing, memory deallocation, interrupt handlers, bus widths and `goto`.
-Its own header says *"each project should tailor the checklist for their needs."*
-This document is that tailoring, plus the findings already open and an ordered
-procedure for working through it.
+These two functions carry the highest defect risk.
+Break into smaller helpers: parent retrieval, child routing, blank handling, thresholding, override handling.
 
-**Sections 2 and 3 are where a reviewer's time is worth the most.**
 
----
 
-## 1. The checklist, tailored
+Add model challengers for deep fields (process_sub, process_l3)
 
-### Applies directly
+train.py calls fit_svm directly → deep fields are always SVM-only.
+Add optional LR/SGD/XGB gating for deeper levels.
 
-| ID | Item | Where to check it |
-| --- | --- | --- |
-| CST-1 | Style consistent throughout | All 13 modules in `TIR_Production/src/`, one author |
-| CST-3 | Revision marked in the comment header | **See finding F-2 below** |
-| COR-1 | Is the logic correct? | §4 procedure, step 3 |
-| COR-2 | Checks to ensure data integrity | Translated below |
-| COR-3/4 | Implements the requirements it is traced to | **See findings F-1 and F-3** |
-| CST-4 | Does the code reflect the design? | `ARCHITECTURE.md` is the design record |
-| APP-1 | Sufficiently data-driven | `config/config.json` drives targets, aliases, thresholds. Adding an export layout or a field needs no code |
-| APP-5 | Unused/unnecessary files referenced | **See finding F-5** |
-| APP-6 | Obvious dead code | 16 modules to 13; `tune_weights.py` and `embedding.py` deleted as unreferenced |
-| APP-8 | Errors/exceptions obvious and concise | Check `preprocess` and `inference` raise with the fix in the message |
-| APP-10 | Compiles cleanly with warnings enabled | `pyright` — 0 errors. Two warning filters exist and both carry a written justification |
-| APP-12 | Redundant or duplicate code | The consolidation commit `825a5c1` exists for this reason |
-| APP-13 | Loop endpoints, off-by-one | Highest risk is the label-id round trip, §3 |
-| APP-14 | Type conversions and loss of precision | Translated below — this caught a real defect |
-| APP-24 | Absolute pathnames hardcoded | **Checked: none.** All paths derive from `config.ROOT` |
-| APP-26 | Complexity under ten branches | **See finding F-4 — ten functions fail this** |
-| APP-27 | SLOC per subprogram | **See finding F-4** |
-| TST-1 | Are the test cases still valid? | 46 tests; check they assert behaviour and not implementation |
 
-### Applies once translated out of C
 
-The literal question does not apply, but the failure mode does — and in two
-cases it is where real defects were actually found.
+Revisit equal-weight blending for ensemble models
 
-| Checklist asks | For this project, read as | Status |
-| --- | --- | --- |
-| Checks to prevent dereferencing null pointers | Handling of `None` and pandas `NA` | **Two real defects found here.** `st.selectbox` returns `None` on an empty list; `int()` on a pandas `NA` raises. Both fixed in `d8447c4`. Assume more exist |
-| Checks to ensure data is within bounds | Label ids stay inside the label map; a per-parent model's classes map back to the right global ids | `models.expand_proba` — the single most damaging place to be wrong |
-| Data from external interfaces is valid before use | A QPS export with unexpected or missing columns | `data.resolve_columns` and `validate_input_dataframe` |
-| Is allocated memory properly deallocated; memory leaks | Peak memory on the full matrix | **Was killed twice by the kernel.** Boosting now runs on a reduced feature space, measured at 3.27 GB |
-| Type conversions causing unwanted loss | `astype(str)` on a missing value | **Real defect.** pandas 2 renders it `"nan"`, pandas 3 keeps it missing — a check written for one silently did nothing on the other |
-| Are all cases present in a select statement | Every branch of the parent/child routing | Four cases in `inference._predict_child`; confirm none is unhandled |
-| Unsafe library or system calls | `joblib.load` unpickles, which executes | Guarded: SHA-256 verified **before** load, in `models.verify_model_hash` |
+Currently, if SVM+SGD survive gate, they get 50/50 even if SGD beat SVM by several points.
+Add a weighted scheme:
 
-### Does not apply, and why
+weight ∝ validation macro-F1
+or allow manual override in config.
 
-Record the reason in the checklist rather than leaving the box blank.
 
-| Checklist item | Why not |
-| --- | --- |
-| Memory allocation and deallocation, leaks | Python is garbage-collected; no manual allocation |
-| Interrupt context, interrupt handlers (3 items) | No interrupt-level code |
-| Physical device access, bus width | No device access |
-| Network byte order, packing, alignment | No socket-level protocol; HTTP and files only |
-| `goto` statements | Not in the language |
-| Non-standard compiler features | Interpreted; no compiler |
-| POSIX conformance, operating-system interfaces | Not OS-level code |
-| Elevated permissions | Runs as an ordinary user; writes only inside the project |
-| `else-if` where a case statement fits | Dispatch is by dictionary lookup throughout |
 
----
 
-## 2. Findings already open
 
-Found while preparing this. Raised here so review time goes on what has **not**
-been found.
+Add specific tests for hierarchical routing
 
-**F-1 — Requirement traceability was lost in the refactor, now restored.**
-The prototype traced seven requirements. Splitting `utils.py` into `data.py` and
-`models.py`, and `paths.py` into `config.py`, carried the code but not the
-markers — REQ-001, 002, 010, 011 and 012 lost their trace. Restored. Verify:
+Verify correct parent mapping
+Verify alternates (top_k) returned correctly
+Verify reviewer override cascades as intended
 
-```bash
-for r in 001 002 010 011 012 014; do grep -rl "REQ-$r" TIR_Production/src/; done
-```
 
-**F-2 — No module carries an author or revision header.** CST-3 asks for this.
-The prototype had them on two modules; none of the current 13 has one. Not
-fixed, because the convention should be the project's rather than mine. **Decide
-what CST-3 requires here and I will apply it.**
 
-**F-3 — REQ-013 has no implementing code.** *"Deterministic dense text
-embeddings, no external model files."* The module was deleted: measured against
-a held-out split it cost 0.1 accuracy and 0.3 macro-F1 while taking about
-sixteen times as long to compute as training the model. **A requirement was
-retired by measurement, which is a decision the SDD should record rather than
-something a code review absorbs silently.**
+Strengthen NA / None handling in several modules
 
-**F-4 — Ten functions exceed the complexity limit; ten exceed a reasonable
-length.** APP-26 asks for branches of control under ten.
+Two NA bugs were found; assume similar defects remain.
+Add explicit NA guards in inference/classify, feedback, preprocess.
 
-| Function | Complexity | Lines |
-| --- | ---: | ---: |
-| `inference.classify` | 19 | 88 |
-| `app.render_single` | 19 | 100 |
-| `preprocess.main` | 17 | 124 |
-| `inference.load_bundle` | 17 | — |
-| `reports.build_sufficiency` | 17 | 141 |
-| `train.main` | 16 | 166 |
-| `inference._predict_child` | 15 | 66 |
-| `reports.build_benchmark` | 14 | 114 |
-| `train.train_hierarchical` | 14 | 100 |
-| `train.gate_models` | 11 | 157 |
 
-Average across all 81 functions is 5.2, so this is concentrated rather than
-general. The `main` functions are orchestration, which is a weaker case for
-concern than tangled logic. **`inference.classify` is not** — it is the highest
-complexity, and independently the function I would look at first for a defect.
-That convergence is worth taking seriously.
 
-**F-5 — `api.py` is referenced by nothing.** APP-5. It is a working HTTP
-endpoint with no known caller. Either something is going to call it, or it and
-four pinned dependencies should go.
+Improve normalization error logging
 
----
+When a category is unmapped, warn with structured logging.
+Current print statements are good but could be easier to aggregate.
 
-## 3. Where a defect would do the most damage
 
-Ranked by consequence, not likelihood.
 
-1. **`inference.classify` and `_predict_child`** — rows are grouped by their
-   parent's predicted label and each group routed to that parent's model. A row
-   in the wrong group gets a confidently wrong answer and raises nothing.
-2. **`models.expand_proba`** — scatters a per-parent model's local classes into
-   the global label space. Off by one here produces plausible, systematically
-   wrong codes.
-3. **`preprocess.build_hierarchy`** — built from the **training split only**. If
-   validation or test rows leaked in, every hierarchical figure is flattered.
-4. **`feedback.CorrectionIndex`** — a wrong match applies a reviewer's label to
-   a TIR they never saw, carrying their authority.
-5. **`data.canonicalize`** — two columns folding to one canonical name. There is
-   a guard; confirm it holds.
+MEDIUM PRIORITY (Maintainability / Design)
 
----
 
-## 4. Procedure
+Add module-level author/revision headers (CST‑3)
 
-**Step 1 — Read the commit log (20 min).**
+Your team should decide the convention.
+Apply once agreed.
 
-```bash
-git log --oneline origin/main..HEAD
-```
 
-Sixteen commits, each carrying the measurement that motivated it. The messages
-are the design record; read them before any diff.
 
-**Step 2 — Reproduce the numbers (30 min, mostly waiting).**
+Decide future of api.py
 
-```bash
-cd TIR_Production
-python -m pytest test                    # 46 tests, ~2s
-python -m src.preprocess --raw_csv "QPS Pull ….xlsx" "TIR Export Example1.xlsx"
-python -m src.train --no-gate            # ~7 min
-python -m src.reports benchmark
-```
+If unused → remove and simplify dependency footprint.
+If kept → add tests and documentation.
 
-Expect accuracy within a point of 92.8 / 88.2 / 80.8 / 73.6. **A number that
-does not reproduce is a finding — raise it.**
 
-**Step 3 — Read `src/inference.py` in full (30 min).** 292 lines, and every
-prediction goes through it. This is where §3 says the damage is.
 
-**Step 4 — Work §1 against the code (45 min).** The rows marked *"see finding"*
-are done; the rest need a reviewer.
+Decompose long “main” functions
 
-**Step 5 — Decide on §5 (15 min).** These are judgement calls, and disagreeing
-is a legitimate outcome.
+train.main, preprocess.main, reports.build_sufficiency, etc.
+These exceed complexity thresholds primarily due to orchestration.
 
----
 
-## 5. Judgement calls open to challenge
 
-| Call | Grounds | Push back if |
-| --- | --- | --- |
-| Correction reuse at 0.80 similarity | Typo 0.815, plural 0.857, inserted word 0.842; reordering 0.610, rewording 0.207 | Reusing across a plural is too loose for you |
-| Level 3 returns a ranked three, not one answer | 67 % coder agreement | You would rather have one answer and a flag |
-| `min_class_size` 10 for the deep fields | Keeps 96.7 % of records | Rare codes should appear even if unlearnable |
-| Boosting limited to 30,000 features | Full width was killed by the kernel twice | It handicaps boosting unfairly |
-| Kept models blended with **equal weights** | No held-out evidence for a split | **This is a real gap.** SGD scored 73.5 against the SVM's 71.1 on Process Cat and gets the same 50 % |
-| The deep fields never get a challenger | Not a decision — an omission | **Also a real gap.** `train.py:466` calls `fit_svm` directly; two of four fields are SVM-only by construction |
-| Coder agreement grouped on Description 1 alone | The full model input shrinks the comparable set tenfold | You think the grouping inflates disagreement — this moves every ceiling figure |
+Add tests for alternates (top‑k outputs)
 
----
 
-## 6. What is unverified
+Convert classify.py’s CSV write from write_text() → to_csv()
 
-- **Windows.** Preprocess and train have run there and matched. The Streamlit
-  app, the session export and the HTTP endpoint have not.
-- **The export opening in Excel proper.** Checked by reading it back with
-  pandas, not by opening it.
-- **The app end to end.** Streamlit is not installed in my environment — which
-  is exactly why the two defects your editor caught were invisible to me.
-- **Anything about how coding actually works today.** All inferred from data.
 
----
 
-## 7. My error patterns
+Prevent CSV embedding inside a text file
+Avoid memory spike on huge outputs.
 
-A defect still present is more likely to be one of these shapes than a novel one.
+LOW PRIORITY (Tooling / Nice-to-have)
 
-| What happened | The pattern |
-| --- | --- |
-| Called the memory problem fixed after measuring only matrix construction. Killed again. | Measuring part of a path, reporting on the whole |
-| Set the correction threshold from false-positive data alone; a typo then failed to match | Optimising one side of a trade-off |
-| Dropped the `selectbox`-returns-`None` guard while consolidating | Losing a defence in a refactor because its reason was in a comment I removed |
-| Lost REQ traceability in the same refactor (F-1) | The same pattern again, which is why F-1 is worth checking for elsewhere |
+Add Streamlit UI regression tests
+Add Excel workbook formatting tests
+Document retirement of REQ‑013 in SDD
+Add richer logging around reviewer overrides
+Add config-driven ability to:
 
----
+tune top_k
+set per-target feature limits
+optionally route by prefix rules for hierarchy analysis
 
-## 8. Questions to put to me
 
-- Why is coder agreement grouped on Description 1 rather than the full input?
-- Why does the hierarchy come from observed pairs rather than the code prefixes,
-  when the codes clearly nest?
-- What happens on an export whose layout no alias covers — loud or quiet?
-- Boosting scored worst on every field. The method, or the feature limit?
-- Is `inference.classify` at complexity 19 worth decomposing, or is the routing
-  genuinely irreducible?
 
-`ARCHITECTURE.md` covers what each module does. `README.md` covers running it.
+
+✅ Answers (or Best-Path Guidance) to the Section 8 Reviewer Questions
+1. Why is coder agreement grouped on Description 1 rather than full model input?
+Answer:
+Because grouping by the full model input shrinks the number of comparable repeated items by ~90%.
+
+Description 2 is missing on ~72% of TIRs
+Doc Title varies widely between exports
+Two TIRs can share Description 1 and legitimately differ in subtle ways.
+Therefore, Description 1 gives a lower-bound estimate of agreement without removing 90% of usable pairs.
+
+2. Why does the hierarchy come from observed parent→child pairs rather than code prefixes?
+Answer:
+Because code prefixes disagree with actual practice in about:
+
+0.1% of Process Sub
+4.5% of Level 3
+Prefix-based nesting is a rule the taxonomy should follow, but observed coder behavior does not always match it.
+If prefix rules were enforced:
+some real pairs would be excluded
+some impossible pairs would be included
+Observed hierarchy ensures the model only predicts combinations that really occur in historical data.
+
+3. What happens on an export whose layout no alias covers — loud or quiet?
+Answer:
+It fails loudly at two points:
+
+resolve_columns() → missing aliases
+validate_input_dataframe() → missing required columns
+This produces explicit errors:
+“missing required column(s) …”
+“absent from this file: …”
+The failure mode is intentional — quiet acceptance would corrupt the dataset.
+
+4. Boosting scored worst on every field. Why — the method or the feature limit?
+Answer:
+It is almost entirely the feature limit, not the method.
+XGBoost:
+
+cannot handle 183,000 TF‑IDF features
+kernel killed full-width runs twice
+reducing to 30,000 features picks top χ² features, favoring frequent categories
+Deep-level categories are too rare → trees cannot learn meaningful splits.
+
+If full-width boosting could run:
+
+It might compete with SVM in top-level fields
+But would still likely struggle on deep taxonomy tail
+
+5. Is inference.classify worth decomposing, or genuinely irreducible?
+Answer:
+It is worth decomposing.
+Reasons:
+
+complexity = 19 (highest in project)
+contains multiple responsibilities:
+
+feature construction
+blank handling
+override logic
+parent routing
+child prediction
+alternate return
+review threshold inheritance
+
+
+
+Separating it into ~4 helper functions:
+
+reduces risk
+improves readability
+makes targeted tests easier
+lets you isolate hierarchical routing (biggest risk area)
