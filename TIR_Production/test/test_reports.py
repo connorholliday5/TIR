@@ -82,3 +82,22 @@ def test_unreachable_precision_returns_none():
     confidence = np.linspace(0.5, 1.0, 500)
     correct = np.zeros(500, dtype=bool)
     assert threshold_for(confidence, correct, 0.95) is None
+
+
+# -- label lookup ------------------------------------------------------------
+
+
+# The label columns round-trip through CSV, so a row can arrive as NA rather
+# than the -1 preprocessing writes for "not coded".  int(NA) raises, which
+# would take down the whole report over one malformed row.
+@pytest.mark.parametrize("value,expected", [
+    (0, "HA Hanger"),
+    (1, "EL Electrical"),
+    (-1, ""),          # preprocessing's "no code for this field"
+    (None, ""),        # a row that lost its label in transit
+    (float("nan"), ""),
+    (99, ""),          # an id no longer in the label map
+])
+def test_label_lookup_survives_every_shape(value, expected):
+    from src.reports import label_to_name
+    assert label_to_name(value, {0: "HA Hanger", 1: "EL Electrical"}) == expected

@@ -147,7 +147,10 @@ def render_single(bundle: dict) -> None:
     if result.get(f"review_{ROOT_TARGET}"):
         st.warning("The model is unsure of this one — confirming it is worth the most here.")
 
-    if choice != predicted and st.button("Apply and re-predict the levels below"):
+    # st.selectbox returns None when its option list is empty, which happens if
+    # a target's label map is missing or empty.  There is nothing to confirm in
+    # that case, and passing None on would reach the models as a category name.
+    if choice and choice != predicted and st.button("Apply and re-predict the levels below"):
         st.session_state["confirmed_parent"] = choice
         st.session_state["result"] = classify_one(fields, bundle, choice)
         if FEEDBACK_ENABLED:

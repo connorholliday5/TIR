@@ -14,7 +14,7 @@
 import argparse
 import json
 from pathlib import Path
-from typing import Dict, List, cast
+from typing import Any, Dict, List, cast
 import numpy as np
 import pandas as pd
 from sklearn.metrics import accuracy_score, f1_score
@@ -261,6 +261,21 @@ def build_sufficiency(raw_csv: List[str], out: Path) -> None:
 # -- benchmark ---------------------------------------------------------------
 
 
+# Resolves a stored label id back to its category name.
+def label_to_name(value: Any, id2name: Dict[int, str]) -> str:
+    """Return the category `value` refers to, or "" when it refers to none.
+
+    Preprocessing writes -1 for "this row carries no code for this field", but
+    the label columns round-trip through CSV, so a row can also arrive as NA —
+    and int(NA) raises ValueError rather than returning anything, which would
+    take down the whole report over one malformed row.
+    """
+    if pd.isna(value):
+        return ""
+    label = int(value)
+    return id2name.get(label, "") if label >= 0 else ""
+
+
 # Finds the lowest threshold that still meets a precision target.
 def threshold_for(confidence: np.ndarray, correct: np.ndarray, target: float):
     """Return (threshold, coverage, precision), or None if unreachable.
@@ -309,7 +324,7 @@ def build_benchmark(split: str, out: Path) -> None:
         if col not in df.columns:
             continue
         id2name = bundle["targets"][target]["id2name"]
-        truth = df[col].map(lambda i: id2name.get(int(i), "") if int(i) >= 0 else "")
+        truth = df[col].map(lambda v: label_to_name(v, id2name))
         judged = (truth != "") & (preds[f"pred_{target}"] != "")
         if not judged.any():
             continue
