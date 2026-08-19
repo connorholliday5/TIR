@@ -36,6 +36,21 @@ logging.basicConfig(
 )
 
 
+# scikit-learn inspects a classifier's classes_ with a heuristic meant to catch
+# a regression target passed to a classifier: it warns when more than half the
+# values are unique and there are over 20 of them.  A classes_ array is unique
+# by definition, so every target here with 21 or more categories trips it — at
+# fit, once per calibration fold, and again at every predict.  Training the
+# per-parent models for the deepest level emits it thousands of times and says
+# nothing about the data either time, so it is filtered here rather than around
+# each call.
+warnings.filterwarnings(
+    "ignore",
+    message="The number of unique classes is greater than 50%",
+    category=UserWarning,
+)
+
+
 # Prints a progress line and records it in the training log.
 def info(msg):
     print(msg, flush=True)
@@ -134,19 +149,7 @@ def fit_svm(X, y, seed: int = SEED):
         cv=folds,
     )
 
-    # Calibration checks its own classes_ array with a heuristic meant for
-    # spotting a regression target fed to a classifier: it warns when more
-    # than half the values are unique and there are over 20 of them.  A
-    # classes_ array is unique by definition, so any classifier with 21+
-    # categories trips it once per fold.  It says nothing about the data.
-    with warnings.catch_warnings():
-        warnings.filterwarnings(
-            "ignore",
-            message="The number of unique classes is greater than 50%",
-            category=UserWarning,
-        )
-        model.fit(X, y)
-
+    model.fit(X, y)
     return model
 
 
@@ -441,8 +444,12 @@ def main():
     clean_old_models()
     MODEL_DIR.mkdir(parents=True, exist_ok=True)
 
-    train_df = pd.read_csv(PROC_DIR / "train.csv")
-    val_df = pd.read_csv(PROC_DIR / "val.csv")
+    # low_memory=False reads each column in one pass.  Chunked reading makes
+    # pandas guess a dtype per chunk and warn about the ones that disagree —
+    # which they do, because the split carries through every column the
+    # original exports had, flags and free text together.
+    train_df = pd.read_csv(PROC_DIR / "train.csv", low_memory=False)
+    val_df = pd.read_csv(PROC_DIR / "val.csv", low_memory=False)
 
     for df in (train_df, val_df):
         df["text"] = df["text"].astype(str).apply(clean_text)
