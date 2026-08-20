@@ -110,6 +110,8 @@ Calibration is what makes the confidence a real probability — see
 The repository root holds the source exports and briefing material; the project
 itself lives in `TIR_Production/`.
 
+For a plain-language explanation of what this does and how, see
+**[OVERVIEW.md](OVERVIEW.md)**.
 For what each file does and how it works, see **[ARCHITECTURE.md](ARCHITECTURE.md)**.
 For reviewing the work, see **[PEER_REVIEW.md](PEER_REVIEW.md)**.
 
@@ -120,6 +122,7 @@ Original - QPS TIR and SURV Import 080326.xlsx   The QPS write-back template
 QPS Pull Jan 2023 - Dec 2025 ....xlsx            Main training export
 TIR Export Example1.xlsx                         Smaller export, largely a subset
 SY4.0_AIML_TIR_TechNav_aRosenbloom.pdf           Project quad chart
+OVERVIEW.md                                      Plain-language explanation, no jargon
 ARCHITECTURE.md                                  What each file does and how it works
 PEER_REVIEW.md                                   How to review this work efficiently
 
