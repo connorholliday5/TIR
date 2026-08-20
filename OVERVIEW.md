@@ -9,273 +9,194 @@ Companion documents: **[README.md](README.md)** to run it,
 
 ---
 
-## What the program does
+## What it does
 
 A coder reads a TIR description and decides which QPS codes it belongs under.
-This program reads the same description and suggests those codes, with a
-confidence attached to each.
+This program reads the same description and suggests those codes, each with a
+confidence. Anything below a set bar goes to a person rather than being guessed
+at quietly. It learned from **90,960 TIRs** — three years of the team's own
+decisions. Not every record carries every code, so each field learns from the
+ones that do.
 
-It is built to **assist rather than replace**. Every suggestion carries a number
-saying how sure it is, and anything below a set bar is handed to a person rather
-than quietly guessed at. The bar is adjustable per field, so the team decides
-how much it wants to check.
+| Field | Codes | Learned from | What it is |
+| --- | ---: | ---: | --- |
+| Metric Cat | 7 | 90,958 | The kind of quality issue |
+| Process Cat | 27 | 61,263 | The discipline it belongs to |
+| Process Sub | 144 | 60,692 | The sub-discipline |
+| Process Level 3 | 543 | 55,069 | The specific finding |
 
-It learned from **90,960 TIRs** — three years of the team's own decisions. Not
-every record carries every code, so each field learns from the ones that have
-it: all 90,958 for Metric Cat, 61,263 for Process Cat.
-
----
-
-## The four fields it codes
-
-| Field | How many codes | What it is |
-| --- | ---: | --- |
-| Metric Cat | 7 | The kind of quality issue |
-| Process Cat | 27 | The discipline it belongs to |
-| Process Sub | 144 | The sub-discipline |
-| Process Level 3 | 543 | The specific finding |
-
-The last two are chosen **inside** the one above them. If it decides a TIR is
-`HA Hanger`, it then picks only from the sub-codes that belong under hangers.
-A combination QPS would reject cannot be produced.
-
-Those two counts are the codes it can actually learn. The full QPS lists are
-larger — 179 and 1,080 — but the rest have been used too rarely to learn from,
-which is improvement 3 below.
+The last two are chosen **inside** the one above. Decide a TIR is `HA Hanger`
+and it picks only from sub-codes belonging under hangers — a combination QPS
+would reject cannot be produced. Those counts are what it can learn; the full
+QPS lists are 179 and 1,080, but the rest are used too rarely to learn from.
 
 ---
 
-## How it actually decides — the four methods
+## The four methods
 
-The program does not have one way of deciding. It has four, they compete, and
-the ones that do best are kept. Each works differently, which is the point:
-where they disagree is where the interesting cases are.
+It does not have one way of deciding. It has four, they compete, and the ones
+that do best are kept.
 
-### Support vector machine
+**Support vector machine.** Every description is a dot on a map, placed by the
+words it contains; this draws the dividing lines between categories as far as
+possible from the nearest examples either side, so a borderline TIR still falls
+on the right side. **Usually wins here.**
 
-Picture every description as a dot on a map, positioned by which words it
-contains. Descriptions using similar words sit near each other.
+**Stochastic gradient.** The same kind of line, reached differently — it looks
+at a handful of TIRs at a time and nudges the line after each. A different
+route settles somewhere slightly different, which is why both are kept. **It
+beat the support vector machine on Process Cat.**
 
-This method draws the dividing lines between categories, and puts each line as
-far as it can from the nearest examples on either side — so a borderline TIR
-still falls on the right side of it.
+**Logistic regression.** No line. It scores every word for and against every
+category — "hanger" towards `HA Hanger`, "cable" against — and adds up the
+words in a description.
 
-It handles having far more words than records, which is this problem exactly:
-183,000 distinct words and word-fragments across 91,000 TIRs. **It is the
-method that usually wins here.**
+**Gradient boosting.** A chain of small yes-or-no questions (*does it mention a
+weld?*), each chosen to fix what the previous ones got wrong. **The weakest
+here:** it must pick individual words to ask about, and there are 183,633.
 
-### Stochastic gradient
-
-Draws the same kind of dividing line, but gets there differently. Instead of
-working out the best line in one go, it looks at a handful of TIRs at a time and
-nudges the line a little after each one, stopping when nudging stops helping.
-
-Because it takes a different route it settles somewhere slightly different —
-which is the whole reason for keeping both. **On Process Cat it beat the support
-vector machine outright**, so both are now used together.
-
-### Logistic regression
-
-Rather than drawing a line, it gives every word a score for and against every
-category. "Hanger" counts towards `HA Hanger`; "cable" counts against it. Add up
-the scores for the words in a description and you get how likely each category
-is.
-
-Straightforward and quick, and it produces sensible probabilities. It has not
-yet beaten the other two on the full data.
-
-### Gradient boosting
-
-Builds a long chain of small yes-or-no questions — *does the description mention
-a weld?* — each new question chosen to fix what the previous ones got wrong.
-
-Very strong on many problems, and **the weakest of the four here.** Its way of
-working needs to pick individual words to ask about, and with 183,000 of them
-there are too many to choose from. It also needed so much memory that early runs
-were shut down by the machine; it now works from the 30,000 most useful words
-rather than all of them.
-
-### How the four are combined
-
-1. All four learn the field.
-2. Each is scored on TIRs it has never seen.
-3. Anything that fails to beat the support vector machine is discarded.
-4. If more than one survives, the program works out **how much to trust each**,
-   again by testing on unseen TIRs.
-
-That last step matters. Two methods surviving does not make them equally good.
-On Process Cat the second scored 2.4 points above the first, and until recently
-both were trusted equally — the program now works out the split and records both
-the old and new score so the difference is visible.
-
-**Measured on the last complete run:**
-
-| Field | Support vector | Stochastic gradient | Logistic | Boosting | Kept |
-| --- | ---: | ---: | ---: | ---: | --- |
-| Metric Cat | **73.0** | 65.8 | 66.3 | 67.8 | The first alone |
-| Process Cat | 71.1 | **73.5** | 70.6 | 65.4 | The first two, blended |
-
-*(The score counts every category equally, so a common one and a rare one weigh
-the same. It is deliberately harsher than "percent correct".)*
+**How they combine.** All four learn the field; each is scored on TIRs it has
+never seen; anything failing to beat the support vector machine is discarded.
+If more than one survives, the program works out **how much to trust each** —
+two survivors are not automatically equal.
 
 ---
 
-## What "confidence" means here
+## Reading the training output
 
-Every suggestion comes with a number between 0 and 100. It is a genuine
-probability: 80 means the program expects to be right about eight times in ten
-on TIRs it is that sure about.
+Running `python -m src.train` prints this.
 
-That lets the team set a policy instead of a hope:
+```
+Step 1 of 3   Reading the coded TIRs
+              65,718 to learn from, 11,598 held back to mark the work against
+Step 2 of 3   Learning the vocabulary of the descriptions
+              183,633 words and word-fragments found across 65,718 TIRs
+```
 
-| If the bar is set at | It codes automatically | And is right | Leaving for a coder |
+Records are split, and it never sees the held-back ones while learning, so
+scores are earned rather than remembered. "Word-fragments" because it learns
+pieces of words too, so a typo still resembles the word it meant.
+
+```
+  [2 of 4]  Process Cat
+            27 categories, learned from 44,159 coded TIRs
+            Comparing methods, keeping whichever scores best:
+              Support vector machine............  71.1
+              Stochastic gradient...............  72.2
+              Logistic regression...............  70.6
+              Gradient boosting.................  65.3
+            Using:  support vector machine, stochastic gradient, blended
+            Blend:  support vector machine 45%, stochastic gradient 55%  (+0.9)
+```
+
+The four scores are marks out of 100 on TIRs none of them saw. Two beat the
+rest, so both are kept — and the blend line says the split was worked out, not
+assumed: 45/55, worth **0.9 points more** than trusting them equally. The score
+counts every category equally, so one coded daily and one coded twice a year
+weigh the same; it is deliberately harsher than "percent correct".
+
+```
+  [3 of 4]  Process Sub
+            144 categories, learned from 43,740 coded TIRs
+            25 groups of codes: 20 learned from examples,
+                                 5 had only one possible answer
+```
+
+For the deeper fields it builds one small model per parent category rather than
+one large one. Some parents have a single possible sub-code, so no model is
+needed.
+
+---
+
+## What confidence means
+
+Every suggestion carries a number from 0 to 100, and it is a real probability:
+80 means it expects to be right about eight times in ten on TIRs it is that
+sure about. That lets the team set a policy rather than a hope.
+
+| Field | Codes automatically | And is right | Left for a coder |
 | --- | ---: | ---: | ---: |
-| Process Cat | **80%** of TIRs | **95%** of the time | 20% |
-| Metric Cat | **94%** of TIRs | **95%** of the time | 6% |
+| Metric Cat | 94% | 95% | 6% |
+| Process Cat | 80% | 95% | 20% |
+| Process Sub | — | — | *cannot reach 95%* |
+| Process Level 3 | — | — | *cannot reach 95%* |
 
-Process Sub and Process Level 3 **cannot reach 95%** at any setting. They top out
-near 92% and 94% even when only the most confident answers are kept. They can
-help a coder; they should not code unwatched.
+The two deepest fields top out near 92% and 94% even when only the most
+confident answers are kept. They can help a coder; they should not code
+unwatched.
 
 ---
 
-## What changed from the first prototype
+## What changed from the prototype
 
-| | The prototype | Now |
+| | Prototype | Now |
 | --- | --- | --- |
-| Spreadsheets it reads | One layout only | Any of the three QPS produces |
+| Spreadsheets read | One layout | Any of the three QPS produces |
 | Fields coded | 2 | 4 |
-| Do the codes fit together? | Not checked | Guaranteed — each level chosen inside the one above |
-| Confidence | A number that could not be trusted | A real probability, set per field |
-| Single TIRs | One at a time, nothing kept | Collected through a sitting, exported as one spreadsheet |
-| Deciding which method to use | Three fixed, never compared | Four compete; only what earns its place is kept |
-| Training data | One export | Both, with 12,321 duplicate records removed |
+| Codes fit together? | Not checked | Guaranteed by construction |
+| Confidence | Could not be trusted | A real probability, set per field |
+| Single TIRs | Nothing kept | Collected, exported as one spreadsheet |
+| Choosing a method | Three fixed, never compared | Four compete; only what earns its place |
+| Training data | One export | Both, 12,321 duplicate records removed |
 
-### Three things found in the data along the way
+Three things surfaced along the way. The two exports **overlap almost
+entirely** — the smaller is 99.4% inside the larger — but name their columns
+differently, so nothing noticed: the same TIRs would have been learned from
+twice, then used to mark the program's own work. **A third of records had no
+Process Cat**, and the prototype was learning "blank" as a real category; it
+had become the largest category in the data. And **coders disagree with each
+other** — where the same description was coded more than once, the codes
+conflict:
 
-None of these were what anyone set out to look for.
+| Field | Codes conflict | Model is at |
+| --- | ---: | ---: |
+| Metric Cat | 32% | 92.8% |
+| Process Cat | 31% | 88.2% |
+| Process Sub | 43% | 80.8% |
+| Process Level 3 | 52% | 73.6% |
 
-**The two spreadsheets overlap almost entirely.** The smaller one is 99.4%
-contained in the larger. Because they name their columns differently, nothing
-noticed — the same TIRs would have been learned from twice and then used to mark
-the program's own homework.
-
-**A third of records had no Process Cat, and the prototype was learning
-"blank" as though it were a real category.** It had become the single largest
-category in the training data.
-
-**Coders disagree with each other more than expected.** Where the same
-description was coded more than once, the codes given differ:
-
-| Field | How often the codes conflict |
-| --- | ---: |
-| Metric Cat | 32% |
-| Process Cat | 31% |
-| Process Sub | 43% |
-| Process Level 3 | 52% |
-
-This is the most important finding in the project, and it is not a criticism of
-the coders — some of it is genuinely ambiguous TIRs. But **it sets a ceiling.**
-The program cannot be more consistent than the records it learned from, and it
-is already at that ceiling on every field. Getting better numbers now depends on
-agreeing the codes, not on better software.
+That last one is the most important finding, and it is not a criticism — some
+TIRs are genuinely ambiguous. But it **sets a ceiling**, and the program is
+already at it on every field. Better numbers now depend on agreeing the codes,
+not on better software.
 
 ---
 
-## Two questions worth answering up front
+## Two questions from review
 
-### "Why does it only look at Description 1?"
+**"Why only Description 1?"** For coding, it is not — the program reads
+Description 1, Description 2 and Doc Title together, worth 5.4 points. Only the
+*agreement* figures group on Description 1 alone, because matching on all three
+makes near-identical TIRs look distinct: the comparable set drops **eleven-fold**,
+from 932 repeated Process Cat descriptions to 83. Two TIRs sharing a
+Description 1 can be different events, so those agreement figures are a
+**floor** — real agreement is somewhat better.
 
-**For coding a TIR, it does not.** The program reads **Description 1,
-Description 2 and the Doc Title** together. Adding the second and third was
-measured and kept: it improved the balanced score by 5.4 points, almost all of
-it on the rarer categories.
-
-The confusion comes from a different number in this document — the one saying
-how often coders agree with each other. **That** measurement groups on
-Description 1 alone, and here is why.
-
-To ask "was the same description coded the same way twice?" you first have to
-find descriptions that appear twice. Matching on all three fields makes
-near-identical TIRs look distinct, because Description 2 is blank on most
-records and the Doc Title varies between exports. The comparable set collapses:
-
-| Field | Repeated descriptions found using Description 1 | Using all three fields |
-| --- | ---: | ---: |
-| Metric Cat | 1,974 | 179 |
-| Process Cat | 932 | 83 |
-| Process Sub | 897 | 80 |
-| Process Level 3 | 716 | 63 |
-
-**Eleven times fewer** in every field — too few to say anything steady.
-
-The trade-off is honest and stated: two TIRs sharing a Description 1 can
-legitimately be different events, so some of what is counted as disagreement is
-two coders correctly coding two different things. **That makes the agreement
-figures a floor, not a ceiling** — the real agreement is somewhat better than
-the numbers here. It is also why double-coding 200 TIRs deliberately would
-settle the question properly.
-
-### "Why build the code hierarchy from what coders actually did, rather than from the code numbering?"
-
-The codes look like they nest. `HA Hanger` contains `HAPI Piping`, which
-contains `HAPIFK Fit/Alignment incorrect` — each code starts with its parent's
-code. It is tempting to use that rule to decide which sub-codes belong under
-which category.
-
-We checked whether the records follow it:
-
-| Level | Codes that nest as the numbering implies | Records that do not |
-| --- | ---: | ---: |
-| Sub under Category | 99.89% | 66 |
-| Level 3 under Sub | 95.51% | **2,555** |
-
-At the deepest level, **one record in twenty-two does not follow the rule.**
-
-So the numbering describes what the taxonomy intended, and the records describe
-what was actually coded. Building from the numbering would do two things, both
-wrong:
-
-- **Rule out real combinations.** Those 2,555 records were coded by people and
-  presumably for a reason. A prefix rule would declare them impossible and the
-  program could never suggest them.
-- **Allow combinations nobody uses.** Any code pair whose numbering lines up
-  would be permitted, including many that have never appeared in three years.
-
-Building from observed pairs means the program can only suggest a combination
-that the team has actually used. It is worth knowing that the mismatch exists —
-**2,555 records disagreeing with the numbering is either a coding pattern worth
-understanding or a data-quality issue worth fixing**, and we cannot tell which
-from the data alone.
+**"Why build the hierarchy from what coders did, rather than the code
+numbering?"** The codes look like they nest — `HA` → `HAPI` → `HAPIFK` — but
+records follow that only 99.89% of the time at the second level and **95.51% at
+the third: 2,555 records disagree.** Building from the numbering would rule
+those real combinations out and admit combinations nobody has used in three
+years. *Those 2,555 are either a coding pattern worth understanding or a
+data-quality issue worth fixing — the data cannot say which.*
 
 ---
 
 ## What would improve it
 
-In order of what it is worth:
-
 1. **Settle the conflicting codes.** 291 descriptions were given two different
-   Process Cats. That list can be handed over as a spreadsheet — it is a day or
-   two of work and it is the only thing that raises the ceiling.
-2. **Write down the tie-breakers.** If experienced coders can name the five
-   pairs of categories they always have to stop and think about, a single page
-   of *"when it is both X and Y, code X"* helps the coders and the program
-   equally.
+   Process Cats. That list can be handed over as a spreadsheet — a day or two of
+   work, and the only thing that raises the ceiling.
+2. **Write down the tie-breakers.** One page of *"when it is both X and Y, code
+   X"* for the pairs coders always stop and think about helps people and
+   program equally.
 3. **Retire the 537 Level 3 codes** used fewer than ten times in three years.
-   They cannot be learned, and they are 537 options a coder has to scroll past.
 4. **Confirm the Process Cat before the deeper codes are chosen.** Already in
-   the app. Doing it lifts the sub-code from 81% to 90% — one click, worth more
-   than every software change tried.
+   the app. Lifts the sub-code from 81% to 90% — one click, worth more than
+   every software change tried.
 
----
-
-## The honest summary
-
-The program codes Metric Cat and Process Cat about as consistently as the team
-does, and can take roughly 80% of Process Cat off the queue at 95% accuracy.
-
-The two deepest levels are genuinely hard — for people as much as for software —
-and should stay advisory.
-
-Nothing further in the software will move these numbers much. What will is
-agreement about what the codes mean.
+**In short:** it codes Metric Cat and Process Cat about as consistently as the
+team does, and can take roughly 80% of Process Cat off the queue at 95%
+accuracy. The two deepest levels are genuinely hard — for people as much as for
+software — and should stay advisory. Nothing further in the software moves these
+numbers much; agreement about what the codes mean will.
