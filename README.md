@@ -123,6 +123,7 @@ QPS Pull Jan 2023 - Dec 2025 ....xlsx            Main training export
 TIR Export Example1.xlsx                         Smaller export, largely a subset
 SY4.0_AIML_TIR_TechNav_aRosenbloom.pdf           Project quad chart
 OVERVIEW.md                                      Plain-language explanation, no jargon
+OVERVIEW.pdf                                     The same, print-ready (build_overview_pdf.py)
 ARCHITECTURE.md                                  What each file does and how it works
 PEER_REVIEW.md                                   How to review this work efficiently
 

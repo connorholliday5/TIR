@@ -35,13 +35,13 @@ it: all 90,958 for Metric Cat, 61,263 for Process Cat.
 | Process Sub | 144 | The sub-discipline |
 | Process Level 3 | 543 | The specific finding |
 
-The last two counts are the codes it can actually learn. The full QPS lists are
-larger — 179 and 1,080 — but the rest have been used too rarely to learn from,
-which is the subject of improvement 3 below.
-
 The last two are chosen **inside** the one above them. If it decides a TIR is
 `HA Hanger`, it then picks only from the sub-codes that belong under hangers.
 A combination QPS would reject cannot be produced.
+
+Those two counts are the codes it can actually learn. The full QPS lists are
+larger — 179 and 1,080 — but the rest have been used too rarely to learn from,
+which is improvement 3 below.
 
 ---
 
@@ -179,6 +179,74 @@ the coders — some of it is genuinely ambiguous TIRs. But **it sets a ceiling.*
 The program cannot be more consistent than the records it learned from, and it
 is already at that ceiling on every field. Getting better numbers now depends on
 agreeing the codes, not on better software.
+
+---
+
+## Two questions worth answering up front
+
+### "Why does it only look at Description 1?"
+
+**For coding a TIR, it does not.** The program reads **Description 1,
+Description 2 and the Doc Title** together. Adding the second and third was
+measured and kept: it improved the balanced score by 5.4 points, almost all of
+it on the rarer categories.
+
+The confusion comes from a different number in this document — the one saying
+how often coders agree with each other. **That** measurement groups on
+Description 1 alone, and here is why.
+
+To ask "was the same description coded the same way twice?" you first have to
+find descriptions that appear twice. Matching on all three fields makes
+near-identical TIRs look distinct, because Description 2 is blank on most
+records and the Doc Title varies between exports. The comparable set collapses:
+
+| Field | Repeated descriptions found using Description 1 | Using all three fields |
+| --- | ---: | ---: |
+| Metric Cat | 1,974 | 179 |
+| Process Cat | 932 | 83 |
+| Process Sub | 897 | 80 |
+| Process Level 3 | 716 | 63 |
+
+**Eleven times fewer** in every field — too few to say anything steady.
+
+The trade-off is honest and stated: two TIRs sharing a Description 1 can
+legitimately be different events, so some of what is counted as disagreement is
+two coders correctly coding two different things. **That makes the agreement
+figures a floor, not a ceiling** — the real agreement is somewhat better than
+the numbers here. It is also why double-coding 200 TIRs deliberately would
+settle the question properly.
+
+### "Why build the code hierarchy from what coders actually did, rather than from the code numbering?"
+
+The codes look like they nest. `HA Hanger` contains `HAPI Piping`, which
+contains `HAPIFK Fit/Alignment incorrect` — each code starts with its parent's
+code. It is tempting to use that rule to decide which sub-codes belong under
+which category.
+
+We checked whether the records follow it:
+
+| Level | Codes that nest as the numbering implies | Records that do not |
+| --- | ---: | ---: |
+| Sub under Category | 99.89% | 66 |
+| Level 3 under Sub | 95.51% | **2,555** |
+
+At the deepest level, **one record in twenty-two does not follow the rule.**
+
+So the numbering describes what the taxonomy intended, and the records describe
+what was actually coded. Building from the numbering would do two things, both
+wrong:
+
+- **Rule out real combinations.** Those 2,555 records were coded by people and
+  presumably for a reason. A prefix rule would declare them impossible and the
+  program could never suggest them.
+- **Allow combinations nobody uses.** Any code pair whose numbering lines up
+  would be permitted, including many that have never appeared in three years.
+
+Building from observed pairs means the program can only suggest a combination
+that the team has actually used. It is worth knowing that the mismatch exists —
+**2,555 records disagreeing with the numbering is either a coding pattern worth
+understanding or a data-quality issue worth fixing**, and we cannot tell which
+from the data alone.
 
 ---
 
