@@ -9,10 +9,12 @@
 # answer per row, and artifact integrity checks.
 
 import hashlib
+from itertools import product
 from pathlib import Path
 from typing import Any, Dict, Sequence, Tuple, cast
 import numpy as np
 from scipy.sparse import csr_matrix, hstack, vstack
+from sklearn.metrics import f1_score
 
 
 # Stacks sparse blocks side by side and returns a CSR matrix.
@@ -184,3 +186,56 @@ def verify_model_hash(model_path: Path) -> None:
             f"Model integrity check failed for {model_path.name}: "
             f"expected {expected[:8]}…, got {actual[:8]}…"
         )
+
+# Yields every weighting over `names` on a grid, normalised to sum to one.
+def weight_grid(names: Sequence[str], step: float = 0.05):
+    """Yield each candidate weighting as {name: weight}."""
+    points = [round(i * step, 4) for i in range(int(round(1 / step)) + 1)]
+    for combination in product(points, repeat=len(names) - 1):
+        remainder = round(1.0 - sum(combination), 4)
+        if remainder < -1e-9:
+            continue
+        yield dict(zip(names, (*combination, max(remainder, 0.0))))
+
+
+# Chooses how much to trust each member of a blend.
+def search_blend_weights(
+    probas: Dict[str, np.ndarray],
+    y_true: np.ndarray,
+    num_labels: int,
+    step: float = 0.05,
+) -> Tuple[Dict[str, float], float, float]:
+    """Return (weights, its score, the score an even split would have got).
+
+    An even split is the obvious thing to do and the wrong one: two models that
+    both cleared the gate are not therefore equally good, and on the Process
+    Category the second scored 2.4 points above the first while being trusted
+    the same amount.  The weighting is searched on the validation split against
+    macro-F1, the same measure the gate admitted them on.
+
+    An even split is kept when the search cannot beat it, so a weighting is
+    only adopted on evidence rather than on a rounding difference.
+    """
+    names = list(probas)
+    if not names:
+        raise ValueError("A blend needs at least one member.")
+
+    def score_of(weights: Dict[str, float]) -> float:
+        predicted = ensemble_score_matrix(probas, weights, num_labels).argmax(axis=1)
+        return float(f1_score(y_true, predicted, average="macro", zero_division=0))  # type: ignore[arg-type]
+
+    even = {name: round(1.0 / len(names), 4) for name in names}
+    even_score = score_of(even)
+
+    if len(names) == 1:
+        return {names[0]: 1.0}, even_score, even_score
+
+    best, best_score = even, even_score
+    for candidate in weight_grid(names, step):
+        if not any(candidate.values()):
+            continue
+        value = score_of(candidate)
+        if value > best_score:
+            best, best_score = candidate, value
+
+    return best, best_score, even_score

@@ -148,3 +148,64 @@ def test_threshold_above_one_allows_exact_only():
     idx = CorrectionIndex(["bolt loose"], ["FA FASTENER"], threshold=1.5)
     assert idx.lookup("bolt loose")[0] == "FA FASTENER"
     assert idx.lookup("bolt is loose") == (None, 0.0)
+
+
+# -- blend weighting ---------------------------------------------------------
+#
+# Two models that both clear the gate are not therefore equally good. Splitting
+# evenly is the obvious choice and the wrong one — on Process Category the
+# second model scored 2.4 points above the first and was trusted the same
+# amount.
+
+from src.models import search_blend_weights, weight_grid
+
+
+# Every candidate weighting is a distribution.
+def test_weight_grid_sums_to_one():
+    for candidate in weight_grid(["a", "b"], step=0.25):
+        assert sum(candidate.values()) == pytest.approx(1.0)
+
+
+def test_weight_grid_covers_the_endpoints():
+    grid = list(weight_grid(["a", "b"], step=0.5))
+    assert {"a": 1.0, "b": 0.0} in grid
+    assert {"a": 0.0, "b": 1.0} in grid
+
+
+# A single member is trusted entirely; there is nothing to weigh it against.
+def test_single_member_takes_all_the_weight():
+    probas = {"svm": np.array([[0.9, 0.1], [0.2, 0.8]])}
+    weights, _, _ = search_blend_weights(probas, np.array([0, 1]), 2)
+    assert weights == {"svm": 1.0}
+
+
+# Where one member is right and the other wrong, the search should stop
+# trusting the wrong one rather than average them.
+def test_search_moves_weight_towards_the_better_member():
+    truth = np.array([0, 1, 0, 1])
+    good = np.array([[0.9, 0.1], [0.1, 0.9], [0.8, 0.2], [0.2, 0.8]])
+    bad = np.array([[0.1, 0.9], [0.9, 0.1], [0.2, 0.8], [0.8, 0.2]])
+    weights, best, even = search_blend_weights({"good": good, "bad": bad}, truth, 2)
+    assert weights["good"] > weights["bad"]
+    assert best >= even
+
+
+# The returned weighting is the one whose score is reported.
+def test_reported_score_matches_the_chosen_weighting():
+    truth = np.array([0, 1, 0, 1])
+    a = np.array([[0.9, 0.1], [0.1, 0.9], [0.6, 0.4], [0.4, 0.6]])
+    b = np.array([[0.6, 0.4], [0.4, 0.6], [0.9, 0.1], [0.1, 0.9]])
+    weights, best, _ = search_blend_weights({"a": a, "b": b}, truth, 2)
+    from src.models import ensemble_score_matrix
+    from sklearn.metrics import f1_score
+    predicted = ensemble_score_matrix({"a": a, "b": b}, weights, 2).argmax(axis=1)
+    assert f1_score(truth, predicted, average="macro", zero_division=0) == pytest.approx(best)
+
+
+# Two members of equal quality should not be disturbed off an even split.
+def test_equal_members_stay_even():
+    truth = np.array([0, 1, 0, 1])
+    same = np.array([[0.8, 0.2], [0.2, 0.8], [0.7, 0.3], [0.3, 0.7]])
+    weights, best, even = search_blend_weights({"a": same, "b": same.copy()}, truth, 2)
+    assert best == pytest.approx(even)
+    assert weights == {"a": 0.5, "b": 0.5}

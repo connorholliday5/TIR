@@ -11,7 +11,7 @@ import logging
 import time
 import warnings
 from pathlib import Path
-from typing import Any, Dict, List, Tuple, cast
+from typing import Any, Dict, List, Optional, Sequence, Tuple, cast
 import joblib
 import numpy as np
 import pandas as pd
@@ -29,7 +29,7 @@ from src.config import (
 )
 from src.data import clean_text
 from src.feedback import feedback_training_rows
-from src.models import hstack_csr, write_hashes
+from src.models import expand_proba, hstack_csr, search_blend_weights, write_hashes
 # Configures logging for the training pipeline.
 logging.basicConfig(
     filename=ROOT / "train.log",
@@ -124,6 +124,13 @@ GATE_EARLY_STOPPING = int(GATE.get("early_stopping_rounds", 50))
 GATE_MAX_ROWS = int(GATE.get("max_rows", 0))
 GATE_BOOST_FEATURES = int(GATE.get("boost_features", 30_000))
 
+# Which families are put up against the linear SVM.  The hierarchical fields
+# get the cheap two: their groups are small — some only a few dozen records —
+# and boosting on a handful of rows measures noise rather than a method.
+CHALLENGERS = tuple(GATE.get("challengers", ("sgd", "lr", "xgb")))
+HIERARCHICAL_CHALLENGERS = tuple(GATE.get("hierarchical_challengers", ("sgd", "lr")))
+HIERARCHICAL_MIN_ROWS = int(GATE.get("hierarchical_min_rows", 200))
+
 
 # Removes old model artifacts before training.
 def clean_old_models():
@@ -190,6 +197,22 @@ def fit_svm(X, y, seed: int = SEED):
     return model
 
 
+# Produces one model's probability matrix over the full label space.
+def proba_of(model, X, num_labels: int) -> np.ndarray:
+    """Return (n_rows, num_labels) probabilities, whatever family `model` is.
+
+    A Booster predicts from its own matrix type, over the reduced feature space
+    it was fitted on, and already returns one column per class.
+    """
+    if isinstance(model, xgb.Booster):
+        selector = getattr(model, "feature_selector", None)
+        columns = selector.transform(X) if selector is not None else X
+        return expand_proba(
+            model.predict(xgb.QuantileDMatrix(columns)), np.arange(num_labels), num_labels
+        )
+    return expand_proba(model.predict_proba(X), model.classes_, num_labels)
+
+
 # Scores a fitted model's macro-F1 on the validation rows.
 def macro_f1(model, X, y) -> float:
     """Macro-F1 of `model` on (X, y), or 0.0 when there is nothing to score.
@@ -217,7 +240,11 @@ def macro_f1(model, X, y) -> float:
 
 
 # Decides which model families are worth keeping for a target.
-def gate_models(target, X_train, y_train, X_val, y_val, num_labels) -> Tuple[dict, dict]:
+def gate_models(
+    target, X_train, y_train, X_val, y_val, num_labels,
+    challengers: Optional[Sequence[str]] = None,
+    quiet: bool = False,
+) -> Tuple[dict, dict]:
     """Fit SVM, LR and XGBoost and keep only those that earn their place.
 
     The ensemble was previously a fixed 0.40/0.40/0.20 blend of all three.
@@ -231,14 +258,16 @@ def gate_models(target, X_train, y_train, X_val, y_val, num_labels) -> Tuple[dic
         (models, report) — the fitted models that passed, and what each scored.
     """
     report: Dict[str, float] = {}
+    announce = (lambda msg: None) if quiet else say
+    challengers = list(CHALLENGERS) if challengers is None else list(challengers)
 
-    if not GATE_ENABLED:
+    if not GATE_ENABLED or not challengers:
         svm_only = fit_svm(X_train, y_train)
         if svm_only is None:
             raise RuntimeError(f"{target}: not enough labelled data to fit a classifier.")
         score = macro_f1(svm_only, X_val, y_val)
-        say(f"            Method: {MODEL_NAMES['svm'].lower()} (others not compared)")
-        say(f"            Score: {score_of(score)}")
+        announce(f"            Method: {MODEL_NAMES['svm'].lower()} (others not compared)")
+        announce(f"            Score: {score_of(score)}")
         return {"svm": svm_only}, {"svm": score}
 
     if GATE_MAX_ROWS and len(y_train) > GATE_MAX_ROWS:
@@ -255,8 +284,8 @@ def gate_models(target, X_train, y_train, X_val, y_val, num_labels) -> Tuple[dic
 
     baseline = macro_f1(svm_model, X_val, y_val)
     report["svm"] = baseline
-    say("            Comparing methods, keeping whichever scores best:")
-    say(f"              {MODEL_NAMES['svm']:.<34} {score_of(baseline)}")
+    announce("            Comparing methods, keeping whichever scores best:")
+    announce(f"              {MODEL_NAMES['svm']:.<34} {score_of(baseline)}")
 
     # Several unrelated estimator types share this dict; each is scored
     # through its own branch in save_models and src.inference.
@@ -277,32 +306,37 @@ def gate_models(target, X_train, y_train, X_val, y_val, num_labels) -> Tuple[dic
         try:
             model = fit()
         except Exception as exc:
-            say(f"              {MODEL_NAMES[key]:.<34}   failed")
+            announce(f"              {MODEL_NAMES[key]:.<34}   failed")
             log(f"{target}: {name} could not be fitted ({type(exc).__name__}: {exc})")
             report[key] = float("nan")
             return None
         report[key] = macro_f1(model, X_val, y_val)
-        say(f"              {MODEL_NAMES[key]:.<34} {score_of(report[key])}")
+        announce(f"              {MODEL_NAMES[key]:.<34} {score_of(report[key])}")
         return model
 
-    # `modified_huber` rather than the default hinge: it is the loss that gives
-    # SGDClassifier a predict_proba, and the blend needs probabilities from
-    # every member or the weighted sum stops being one.  It also reaches a
-    # different optimum than LinearSVC despite both being linear — a smooth
-    # loss with early stopping against a hinge fitted to convergence — which is
-    # the point of carrying it as a separate candidate rather than a duplicate.
-    sgd_model = try_challenger("sgd", "SGD (modified huber)", lambda: SGDClassifier(
-        loss="modified_huber",
-        class_weight="balanced",
-        early_stopping=True,
-        n_iter_no_change=5,
-        max_iter=2000,
-        random_state=SEED,
-    ).fit(Xg, yg))
+    # Each challenger is a name the caller can ask for, so the hierarchical
+    # sweep can run the cheap two per parent and leave boosting to the flat
+    # fields, where there is enough data for it to mean anything.
+    def fit_sgd():
+        # `modified_huber` rather than the default hinge: it is the loss that
+        # gives SGDClassifier a predict_proba, and the blend needs probabilities
+        # from every member or the weighted sum stops being one.  It also
+        # reaches a different optimum than LinearSVC despite both being linear —
+        # a smooth loss with early stopping against a hinge fitted to
+        # convergence — which is the point of carrying it separately.
+        return SGDClassifier(
+            loss="modified_huber",
+            class_weight="balanced",
+            early_stopping=True,
+            n_iter_no_change=5,
+            max_iter=2000,
+            random_state=SEED,
+        ).fit(Xg, yg)
 
-    lr_model = try_challenger("lr", "Logistic Regression", lambda: LogisticRegression(
-        max_iter=2500, solver="lbfgs", C=1.5, class_weight="balanced",
-    ).fit(Xg, yg))
+    def fit_lr():
+        return LogisticRegression(
+            max_iter=2500, solver="lbfgs", C=1.5, class_weight="balanced",
+        ).fit(Xg, yg)
 
     def fit_booster():
         # Boosting is the one family here that cannot be handed the full
@@ -315,9 +349,7 @@ def gate_models(target, X_train, y_train, X_val, y_val, num_labels) -> Tuple[dic
         # It is given the most informative GATE_BOOST_FEATURES columns instead.
         # That is not a handicap so much as what trees are for: a tree splits on
         # individual features and cannot use a hundred thousand of them, while a
-        # linear model weights all of them at once.  Selection uses chi-squared
-        # against this target's own labels, so the columns kept are the ones
-        # that separate its categories.
+        # linear model weights all of them at once.
         selector = SelectKBest(chi2, k=min(GATE_BOOST_FEATURES, Xg.shape[1]))
         Xb = selector.fit_transform(Xg, yg)
         Xb_val = selector.transform(X_val)
@@ -357,29 +389,69 @@ def gate_models(target, X_train, y_train, X_val, y_val, num_labels) -> Tuple[dic
         booster.feature_selector = selector  # type: ignore[attr-defined]
         return booster
 
-    booster = try_challenger("xgb", "XGBoost", fit_booster)
+    fits = {"sgd": ("SGD (modified huber)", fit_sgd),
+            "lr": ("Logistic Regression", fit_lr),
+            "xgb": ("XGBoost", fit_booster)}
 
-    for name, model in (("sgd", sgd_model), ("lr", lr_model), ("xgb", booster)):
+    for key in challengers:
+        if key not in fits:
+            raise ValueError(f"Unknown challenger '{key}'; known: {', '.join(fits)}")
+        name, fit = fits[key]
+        model = try_challenger(key, name, fit)
         if model is None:
             continue
-        if report[name] > baseline:
-            kept[name] = model
-            log(f"{target}: keeping {name} ({report[name]:.4f} > {baseline:.4f})")
+        if report[key] > baseline:
+            kept[key] = model
+            log(f"{target}: keeping {key} ({report[key]:.4f} > {baseline:.4f})")
         else:
-            log(f"{target}: dropping {name} ({report[name]:.4f} <= {baseline:.4f})")
+            log(f"{target}: dropping {key} ({report[key]:.4f} <= {baseline:.4f})")
 
     if len(kept) == 1:
-        say(f"            Using:  {MODEL_NAMES['svm'].lower()} — the others scored lower")
+        announce(f"            Using:  {MODEL_NAMES['svm'].lower()} — the others scored lower")
     else:
         blended = ", ".join(MODEL_NAMES[n].lower() for n in kept)
-        say(f"            Using:  {blended}, blended together")
+        announce(f"            Using:  {blended}, blended together")
 
     return kept, report
 
 
+# Decides how much of the blend each surviving model should carry.
+def weigh_blend(models: dict, X_val, y_val, num_labels: int, announce) -> Tuple[dict, dict]:
+    """Search the blend weights on validation, and report what it bought.
+
+    Splitting evenly is the obvious choice and the wrong one: two models that
+    both cleared the gate are not therefore equally good.  A weighting is only
+    adopted where it beats the even split on the same measure the gate used.
+    """
+    if len(models) < 2:
+        return {name: 1.0 for name in models}, {}
+
+    probas = {name: proba_of(model, X_val, num_labels) for name, model in models.items()}
+    weights, best, even = search_blend_weights(probas, np.asarray(y_val), num_labels)
+
+    detail = {"searched": round(best, 6), "even_split": round(even, 6)}
+    if best > even:
+        shown = ", ".join(f"{MODEL_NAMES[n].lower()} {w:.0%}" for n, w in weights.items() if w)
+        announce(f"            Blend:  {shown}  (+{(best - even) * 100:.1f} over an even split)")
+    else:
+        announce("            Blend:  even split — no weighting beat it")
+    return weights, detail
+
+
 # Saves a target's models and records the weighting inference should use.
-def save_models(out_dir: Path, models: dict, report: dict) -> None:
+def save_models(
+    out_dir: Path, models: dict, report: dict,
+    weights: Optional[Dict[str, float]] = None,
+    blend: Optional[dict] = None,
+) -> None:
     """Write each kept model plus the ensemble.json describing the blend."""
+    weights = weights or {name: round(1.0 / len(models), 4) for name in models}
+
+    # The search can weigh a member to zero, which is the honest answer that it
+    # earns no place in the blend.  Writing it anyway would ship a model that
+    # is loaded, verified and then multiplied by nothing.
+    weights = {name: weight for name, weight in weights.items() if weight > 0}
+    models = {name: model for name, model in models.items() if name in weights}
     out_dir.mkdir(parents=True, exist_ok=True)
     written: List[Path] = []
 
@@ -392,14 +464,10 @@ def save_models(out_dir: Path, models: dict, report: dict) -> None:
             joblib.dump(model, path)
         written.append(path)
 
-    # Equal weights across whatever survived: the members are now all
-    # calibrated probability outputs on the same scale, and there is no
-    # held-out evidence for preferring one over another beyond the gate that
-    # already admitted them.
-    weights = {name: round(1.0 / len(models), 4) for name in models}
-    (out_dir / "ensemble.json").write_text(
-        json.dumps({"weights": weights, "validation_macro_f1": report}, indent=4)
-    )
+    payload = {"weights": weights, "validation_macro_f1": report}
+    if blend is not None:
+        payload["blend_search"] = blend
+    (out_dir / "ensemble.json").write_text(json.dumps(payload, indent=4))
     write_hashes(written)
 
 
@@ -438,6 +506,7 @@ def train_hierarchical(
 
     fallbacks: Dict[str, str] = {}
     deterministic: Dict[str, str] = {}
+    blended: Dict[str, List[str]] = {}
     fitted = skipped = 0
     scores: List[float] = []
 
@@ -463,23 +532,42 @@ def train_hierarchical(
             skipped += 1
             continue
 
-        model = fit_svm(X_train[rows], tr_child[rows])
-        if model is None:
+        val_rows = (va_parent == parent_id) & (va_child >= 0)
+
+        # A parent only gets its challengers screened when it has enough of its
+        # own records for the comparison to mean anything.  Below that the
+        # groups are a few dozen rows and the ranking between families is
+        # noise, so the SVM ships without a contest.
+        big_enough = n_rows >= HIERARCHICAL_MIN_ROWS and val_rows.sum() >= 20
+        challengers = list(HIERARCHICAL_CHALLENGERS) if big_enough else []
+
+        try:
+            models, report = gate_models(
+                target,
+                X_train[rows], tr_child[rows],
+                X_val[val_rows], va_child[val_rows],
+                num_labels,
+                challengers=challengers,
+                quiet=True,
+            )
+        except RuntimeError:
             fallbacks[parent_name] = majority
             skipped += 1
             continue
 
-        out_dir = out_root / str(parent_id)
-        out_dir.mkdir(parents=True, exist_ok=True)
-        joblib.dump(model, out_dir / "svm.pkl")
-        (out_dir / "ensemble.json").write_text(json.dumps({"weights": {"svm": 1.0}}, indent=4))
-        write_hashes([out_dir / "svm.pkl"])
+        weights, _ = weigh_blend(
+            models, X_val[val_rows], va_child[val_rows], num_labels, lambda msg: None
+        )
+        save_models(out_root / str(parent_id), models, report, weights)
+
+        if len(models) > 1:
+            blended[parent_name] = sorted(models)
         fallbacks.setdefault(parent_name, majority)
         fitted += 1
 
-        val_rows = (va_parent == parent_id) & (va_child >= 0)
         if val_rows.sum():
-            scores.append(macro_f1(model, X_val[val_rows], va_child[val_rows]))
+            best = models[max(models, key=lambda n: report.get(n, 0.0))]
+            scores.append(macro_f1(best, X_val[val_rows], va_child[val_rows]))
 
     (out_root / "routing.json").write_text(json.dumps({
         "parent": parent,
@@ -646,14 +734,14 @@ def main():
                 train_df, val_df, X_train, X_val,
             )
         else:
+            y_tr = train_df.loc[tr_rows, col].astype(int).to_numpy()
+            y_va = val_df.loc[va_rows, col].astype(int).to_numpy()
             models, report = gate_models(
-                target,
-                X_train[tr_rows], train_df.loc[tr_rows, col].astype(int).to_numpy(),
-                X_val[va_rows], val_df.loc[va_rows, col].astype(int).to_numpy(),
-                num_labels,
+                target, X_train[tr_rows], y_tr, X_val[va_rows], y_va, num_labels,
             )
-            save_models(MODEL_DIR / target, models, report)
-            score = max(report.get(n, 0.0) for n in models)
+            weights, blend = weigh_blend(models, X_val[va_rows], y_va, num_labels, say)
+            save_models(MODEL_DIR / target, models, report, weights, blend)
+            score = blend.get("searched") or max(report.get(n, 0.0) for n in models)
 
         summary.append((target_title(target), num_labels, score))
 

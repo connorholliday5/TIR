@@ -167,6 +167,16 @@
     "max_boost_rounds": 350,
     "early_stopping_rounds": 50,
     "max_rows": 0,
-    "boost_features": 30000
+    "boost_features": 30000,
+    "challengers": [
+      "sgd",
+      "lr",
+      "xgb"
+    ],
+    "hierarchical_challengers": [
+      "sgd",
+      "lr"
+    ],
+    "hierarchical_min_rows": 200
   }
 }
