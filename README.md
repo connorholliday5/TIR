@@ -57,30 +57,57 @@ work during training, and 13,644 held back and never looked at until the end.
 
 ### 3. What It Codes
 
-Four fields, in order, because the last two are chosen inside the first two:
+QPS codes eleven things, and this codes ten of them. They are laid out here the
+way the QPS screen lays them out:
 
-| Field | Categories | Records available to learn from |
-| --- | --- | --- |
-| Metric Cat | 7 | 90,958 (100 %) |
-| Process Cat | 27 | 61,263 (67 %) |
-| Process Sub | 144 | 60,692 (67 %) |
-| Process Level 3 | 543 | 55,069 (60 %) |
+|  | Category | Sub-Category | 3rd Level |
+| --- | --- | --- | --- |
+| **Metric** | 7 codes · 100 % coded | 21 · 100 % | 63 · 99 % |
+| **Process** | 27 · 67 % | 144 · 67 % | 543 · 61 % |
+| **Program** | 10 · 22 % | 40 · 21 % | 125 · 18 % |
 
-Process Cat is blank on a third of records because informational items are
-rarely coded. Those rows are skipped for that field and still used for the
-fields they do carry.
+plus **DST** — 10 codes, 58 % coded — and **Functional Area**, which is on the
+QPS screen and the write-back template but in none of the exports we have, so
+there is nothing yet to train on.
 
-### 4. Codes That Fit Together
+"% coded" is the share of records carrying that field. A record missing one is
+skipped for it and still used for the fields it does carry.
 
-Process Sub is chosen from the sub-codes that belong under the predicted
-Process Cat, and Process Level 3 from those under the predicted Sub. A
-combination QPS would reject cannot be produced.
+### 4. Which Codes a Record Carries at All
+
+The nine code cells are not nine fields every record fills in. **Process is a
+TIR field and Program is a SURV field:**
+
+| | Process coded | Program coded |
+| --- | ---: | ---: |
+| TIR | 79.5 % | 6.1 % |
+| SURV | 30.3 % | 72.9 % |
+
+Of the whole pull, 54,340 records carry Process but no Program, 15,740 carry
+Program but no Process, and only 7,733 carry both.
+
+This is why each family has its own yes/no classifier deciding whether it
+applies before any code inside it is predicted. The models for a family are
+trained on the records that carry it — that is what stops "uncoded" becoming
+the largest category — so they have never seen a record outside their family
+and would answer one just as confidently. Unguarded, the Program models would
+put a Program code on almost every TIR.
+
+Below its threshold the whole family is withheld, and the app greys it out
+rather than hiding it: an absent Program section reads as a bug, one that says
+the record carries no Program codes is the answer.
+
+### 5. Codes That Fit Together
+
+Each Sub-Category is chosen from the sub-codes belonging under the predicted
+Category, and each 3rd Level from those under the predicted Sub. A combination
+QPS would reject cannot be produced.
 
 This also makes the deepest level workable at all: one model choosing between
-543 codes is neither accurate nor practical, while roughly 85 small models —
+543 codes is neither accurate nor practical, while roughly 120 small models —
 one per parent, each choosing between a handful — is both.
 
-### 5. Model Training
+### 6. Model Training
 
 Text is turned into features two ways, both from the description itself:
 
@@ -96,7 +123,36 @@ choice can be checked rather than taken on trust.
 Calibration is what makes the confidence a real probability — see
 **Accuracy and the Review Threshold** below for why that matters.
 
-### 6. Prediction Tools
+### 7. Where a Language Model Fits
+
+There is one, and it is deliberately small in scope. The classifiers already
+code these fields about as consistently as the team does, so there is nothing
+for a language model to win on the records they are sure of — and asking about
+every one of 40,000 records a year would cost a great deal for it.
+
+Where it helps is the rare tail. Five Process categories appear so seldom that
+the models have never once got them right, and no amount of further training
+fixes a code with two examples behind it. But a *definition* works as well for
+a rare code as a common one, and reading a definition is the one thing the
+classifiers cannot do.
+
+So it is consulted **only on records already flagged for review**, its answer
+is checked against the codes valid under the confirmed category and thrown away
+if it names anything else, and the reasoning it gives comes back with the code —
+into the app and into the export — because a coder checking a suggestion needs
+the argument for it, not just the answer.
+
+Two things it needs, neither of which is in place yet:
+
+- **`config/code_definitions.json`** — what each code means, in the team's own
+  words. Empty today. `python -m src.reports sufficiency` reports the coverage.
+  Without it the model gets the list of valid codes but nothing about what they
+  mean, which is most of the value.
+- **Sign-off to send record text.** `llm.allow_calls` is off, and the real
+  backend refuses to send anything while it is. Wiring it up and letting it see
+  records are separate decisions, and the second belongs to the coding team.
+
+### 8. Prediction Tools
 
 - **Streamlit web app** — code one TIR at a time, collect a session's worth, and
   export them all as one spreadsheet
@@ -128,14 +184,15 @@ ARCHITECTURE.md                                  What each file does and how it 
 PEER_REVIEW.md                                   How to review this work efficiently
 
 TIR_Production/
-  config/config.json           Targets, column aliases, thresholds, model comparison
+  config/config.json           Targets, branches, column aliases, thresholds
+  config/code_definitions.json What each code means — for the language model
   data/raw/                    Raw TIR files (optional; not tracked)
   data/processed/              Cleaned splits, written by src.preprocess
   data/label_map_*.json        One per field: label ID -> category name
   data/hierarchy.json          Which sub-codes belong under which category
   data/feedback.csv            Coder corrections logged from the web app
   logs/
-  models/                      Shared encoders, plus one folder per field
+  models/                      Shared encoders, one folder per field, one per branch
   reports/                     The two study reports, regenerable
   requirements.txt
   pyrightconfig.json           Type-checker settings, so an editor agrees with CI
@@ -146,6 +203,7 @@ TIR_Production/
   src/preprocess.py            Cleaning, labelling, splitting, hierarchy
   src/train.py                 Training and the model comparison
   src/inference.py             Loading the models and coding a TIR
+  src/llm.py                   The language model consulted on flagged records
   src/feedback.py              Coder corrections: stored, reused, retrained on
   src/export.py                The session spreadsheet
   src/classify.py              Batch inference from the command line
@@ -153,7 +211,10 @@ TIR_Production/
   src/app.py                   Streamlit web app
   src/api.py                   HTTP endpoint
 
+  test/conftest.py             Two genuinely trained bundles the tests run against
   test/test_data.py            Column recognition across every export layout
+  test/test_inference.py       Routing: parents, branches, overrides, blanks
+  test/test_llm.py             Prompting, answer validation, the refusal to send
   test/test_models.py          Text assembly, blending, correction reuse
   test/test_reports.py         The agreement measure and the coverage search
   train.log                    Full technical detail of the last training run

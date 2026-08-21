@@ -27,15 +27,49 @@ TRAINING           PREDICTION
 preprocess         models.build_features      word + character TF-IDF
    │                  │
    ▼                  ▼
-train              inference.classify         parent first, then its children
+train              inference.classify         branch, then parent, then child
    │                  │
    ▼                  ▼
 models/            pred / confidence / review flag per field
+                      │
+                      ▼
+                   llm.suggest                only the rows flagged for review
 ```
 
 The split matters: **training and prediction compose their input through the
 same two functions**, so a TIR typed into the web app and the same TIR in an
 uploaded file cannot be read differently.
+
+### The eleven fields
+
+QPS codes eleven things, and the app lays them out as QPS does:
+
+|  | Category | Sub-Category | 3rd Level |
+| --- | --- | --- | --- |
+| **Metric** | `metric_cat` | `metric_sub` | `metric_l3` |
+| **Process** | `process_cat` | `process_sub` | `process_l3` |
+| **Program** | `program_cat` | `program_sub` | `program_l3` |
+
+plus **DST** (`dst`) and **Functional Area** — the latter not yet built, because
+it appears on the QPS screen and the write-back template but in none of the
+exports we have, so there is nothing to train on.
+
+### Branches
+
+The nine code cells are not nine fields every record fills in. Process is a TIR
+field and Program a SURV field: across the three-year pull 54,340 records carry
+Process but no Program, 15,740 carry Program but no Process, and only 7,733
+carry both.
+
+That matters because the in-branch models are trained on coded rows alone —
+which is what stops "uncoded" becoming the largest class — so they have never
+seen a record outside their branch and will answer one just as confidently.
+Each branch therefore has its own yes/no classifier, trained on *every* row,
+consulted before any code within it is predicted. Below its threshold the whole
+family is withheld rather than filled in wrongly.
+
+`config.branches` declares them; `config.families()` derives the grid above from
+the parent chains, so the layout cannot drift from the targets.
 
 ---
 
@@ -171,6 +205,39 @@ scored 99.8 %.
 
 A parent flagged for review passes that flag down, because a wrong parent costs
 the child 9.4 points.
+
+The rules are applied in a fixed order, each outranking the one before it:
+
+1. the model's prediction
+2. **the branch** clears families the record does not carry
+3. **a coder's override** replaces both — they can see the record
+4. **a blank description** clears everything, since there was nothing to read
+5. **inherited doubt** from the parent, applied last so it sees what survived
+
+### `llm.py` — the fallback for what the models cannot code
+
+The classifiers already match how consistently people code these fields, so
+there is nothing for a language model to win on the rows they are sure of. The
+exception is the rare tail: five Process categories appear so seldom that the
+models have never once got them right, and no amount of training fixes a code
+with two examples behind it. A definition, though, is as good for a rare code
+as for a common one — and reading a definition is the one thing the classifiers
+cannot do.
+
+So it is consulted **only on rows already flagged for review**. Its answer is
+matched against the valid children of the confirmed parent and discarded if it
+names anything else, so it cannot produce a combination QPS would reject. The
+reasoning it gives comes back with the code and reaches both the app and the
+export.
+
+`LLMBackend` is a one-method protocol. `FakeBackend` answers from a table, so
+the whole path is tested without a network. `CodexBackend` refuses to send
+anything until `llm.allow_calls` is set — wiring it up and letting it see
+records are separate decisions, and the second one belongs to the coding team.
+
+`config/code_definitions.json` holds what each code means. It is optional and
+currently empty; `reports sufficiency` states the coverage, because that
+coverage is what decides whether consulting a model is worth its cost.
 
 ### `feedback.py` — corrections
 
