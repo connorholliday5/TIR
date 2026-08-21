@@ -156,6 +156,30 @@ def is_blank_text(text) -> bool:
     return not str(text).strip() or str(text).strip().lower() in {"nan", "none"}
 
 
+# The spellings a blank category arrives as once it has been through astype.
+_BLANK_VALUES = ["", "nan", "none", "nat", "<na>"]
+
+
+# Marks the rows where a category column carries no value.
+def blank_values(values: pd.Series) -> pd.Series:
+    """Boolean Series, True where `values` holds no category.
+
+    "Nobody coded this" and "coded as something unrecognised" are different
+    facts and used to be conflated, which fabricated an OTHER category holding
+    a third of the training rows.  Both preprocessing (deciding which rows can
+    train a target) and branch labelling (deciding whether a whole family of
+    codes applies to a record) depend on drawing that line the same way, so
+    they draw it here rather than each writing the check out.
+
+    Tested against `isna` as well as the placeholder spellings: pandas 2
+    renders a missing value as the literal string "nan" under `astype(str)`
+    while pandas 3 keeps it missing, so checking only one of the two silently
+    does nothing on the other version.
+    """
+    raw = cast(pd.Series, values).astype(str).str.strip()
+    return cast(pd.Series, values).isna() | raw.fillna("").str.lower().isin(_BLANK_VALUES)
+
+
 # Joins the configured description columns into the model's input text.
 def build_text_series(df: pd.DataFrame, columns: Sequence[str]) -> pd.Series:
     """Join `columns` into the single text field the models are trained on.

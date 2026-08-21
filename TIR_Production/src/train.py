@@ -24,8 +24,9 @@ from sklearn.metrics import f1_score
 from sklearn.svm import LinearSVC
 
 from src.config import (
-    CONFIG, CONFIG_PATH, DATA_DIR, FEEDBACK_PATH, GATE, HIERARCHY_PATH,
-    MODEL_DIR, PROC_DIR, ROOT, SEED, TARGETS, label_map_path, target_title,
+    BRANCHES, CONFIG, CONFIG_PATH, DATA_DIR, FEEDBACK_PATH, GATE,
+    HIERARCHY_PATH, MODEL_DIR, PROC_DIR, ROOT, SEED, TARGETS,
+    branch_label, branch_title, label_map_path, target_title,
 )
 from src.data import clean_text
 from src.feedback import feedback_training_rows
@@ -471,6 +472,53 @@ def save_models(
     write_hashes(written)
 
 
+# Trains the classifier that decides whether a family of codes applies at all.
+def train_branches(train_df, val_df, X_train, X_val) -> None:
+    """Fit one yes/no classifier per branch and save it beside the targets.
+
+    The in-branch models are trained only on records that carry the branch,
+    because a blank is an absence rather than a category — that is what stops
+    "uncoded" becoming the largest class.  The consequence is that they have
+    never seen a record the branch does not apply to and will answer one just
+    as confidently as any other.  Program codes appear on 72.9% of SURV
+    records and 6.1% of TIRs, so without this the models would put a Program
+    code on almost every TIR.
+
+    Every record trains this, coded or not: here an empty column is not a
+    missing label, it is the negative answer.
+    """
+    if not BRANCHES:
+        return
+
+    say()
+    say("Step 3 of 4   Learning which families of codes apply")
+
+    for branch in BRANCHES:
+        column = branch_label(branch)
+        if column not in train_df.columns:
+            raise ValueError(
+                f"{column} is not in the training split. Re-run preprocessing "
+                f"after adding the '{branch}' branch to {CONFIG_PATH.name}."
+            )
+
+        y_tr = train_df[column].astype(int).to_numpy()
+        y_va = val_df[column].astype(int).to_numpy()
+
+        say()
+        say(f"  {branch_title(branch)}")
+        say(f"            applies to {int(y_tr.sum()):,} of {len(y_tr):,} "
+            f"TIRs learned from ({y_tr.mean():.0%})")
+
+        models, report = gate_models(
+            f"branch_{branch}", X_train, y_tr, X_val, y_va, 2, quiet=True,
+        )
+        weights, blend = weigh_blend(models, X_val, y_va, 2, log)
+        save_models(MODEL_DIR / f"branch_{branch}", models, report, weights, blend)
+
+        best = blend.get("searched") or max(report.get(n, 0.0) for n in models)
+        say(f"            score {score_of(best)}")
+
+
 # Trains one classifier per parent category for a hierarchical target.
 def train_hierarchical(
     target: str, spec: dict, label_maps: dict, hierarchy: dict,
@@ -632,7 +680,7 @@ def main():
         df["text"] = df["text"].astype(str).apply(clean_text)
 
     say()
-    say("Step 1 of 3   Reading the coded TIRs")
+    say("Step 1 of 4   Reading the coded TIRs")
     say(f"              {len(train_df):,} to learn from, "
         f"{len(val_df):,} held back to mark the work against")
 
@@ -665,7 +713,7 @@ def main():
     # Trains TF-IDF vectorizers on training data.  These are unsupervised, so
     # one pair serves every target.
     say()
-    say("Step 2 of 3   Learning the vocabulary of the descriptions")
+    say("Step 2 of 4   Learning the vocabulary of the descriptions")
 
     tfidf_word = TfidfVectorizer(
         lowercase=True,
@@ -709,11 +757,16 @@ def main():
     joblib.dump(tfidf_char, MODEL_DIR / "tfidf_char.pkl")
     write_hashes([MODEL_DIR / name for name in SHARED_ARTIFACTS])
 
+    # Learns which families of codes each record carries before learning the
+    # codes themselves, since a branch that does not apply is not a field to
+    # be filled in wrongly.
+    train_branches(train_df, val_df, X_train, X_val)
+
     # Trains one set of classifiers per target, on the rows that target can
     # use.  A row missing this label carries -1 and is skipped here, while
     # still contributing to any other target it does have.
     say()
-    say("Step 3 of 3   Learning to code each field")
+    say("Step 4 of 4   Learning to code each field")
     summary = []
 
     for position, (target, spec) in enumerate(TARGETS.items(), start=1):

@@ -1,0 +1,34 @@
+{
+  "_README": [
+    "What each QPS code means, in the coders' own words.",
+    "",
+    "Optional. The classifiers learn from examples and read none of this. It",
+    "exists for the language model, which is consulted only on the records the",
+    "classifiers cannot code — and those are overwhelmingly the rare codes,",
+    "where there are too few examples to learn from but a definition is",
+    "exactly as good as it is for a common code.",
+    "",
+    "Five Process categories are currently never predicted correctly because",
+    "they appear once or twice in three years of records. A definition is the",
+    "only thing that can reach them.",
+    "",
+    "Format: field name -> code (exactly as it appears in the exports) -> what",
+    "it means. Fill in what the team has; partial coverage is useful, and",
+    "`python -m src.reports sufficiency` states how much of the taxonomy is",
+    "covered. Fields left out are simply not described to the model.",
+    "",
+    "The examples below are placeholders taken from the code names themselves.",
+    "They are NOT the team's definitions and should be replaced.",
+    "",
+    "Ask the TIR team for the QPS code dictionary."
+  ],
+  "process_cat": {
+    "BL Blasting": "",
+    "ENG Engineering Processes": "",
+    "SH Shielding": "",
+    "SE Seal": "",
+    "TO Tools": ""
+  },
+  "metric_cat": {},
+  "program_cat": {}
+}

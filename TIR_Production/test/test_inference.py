@@ -12,7 +12,11 @@
 import numpy as np
 import pytest
 
-from src.inference import classify
+from src.inference import _consult_llm, _score, classify
+from src.llm import FakeBackend
+from src.models import build_features
+
+from conftest import IN_BRANCH, OUT_OF_BRANCH, PROGRAM_CATS
 
 
 HANGER = "cracked weld on pipe hanger"
@@ -166,3 +170,158 @@ def test_alternates_are_returned_and_stay_within_the_parent(bundle):
 
 def test_no_alternates_column_when_top_k_is_one(bundle):
     assert "alt_process_cat" not in classify([HANGER], bundle).columns
+
+
+# -- branch routing ----------------------------------------------------------
+#
+# A branch decides whether a family of codes applies to the record at all.
+# Process codes are a TIR field and Program codes a SURV field, so most records
+# carry one branch and not the other; the in-branch models never saw a record
+# outside their branch and cannot be trusted to recognise one.
+
+
+# The case the branch exists for: a record that carries no Program codes.
+def test_branch_withholds_a_record_outside_it(branched_bundle):
+    out = classify(OUT_OF_BRANCH[:1], branched_bundle)
+
+    assert out.loc[0, "pred_program_cat"] == ""
+    assert out.loc[0, "confidence_program_cat"] == 0.0
+    assert out.loc[0, "source_program_cat"] == "no program codes on this record"
+
+
+# A withheld branch is not a doubtful answer, so it is not queued for review.
+def test_withheld_branch_is_not_flagged_for_review(branched_bundle):
+    out = classify(OUT_OF_BRANCH[:1], branched_bundle)
+
+    assert not out.loc[0, "review_program_cat"]
+
+
+# The branch must not swallow the records it does apply to.
+def test_branch_answers_a_record_inside_it(branched_bundle):
+    out = classify(IN_BRANCH[:1], branched_bundle)
+
+    assert out.loc[0, "pred_program_cat"] in set(PROGRAM_CATS.values())
+    assert out.loc[0, "confidence_program_cat"] > 0.0
+
+
+# Both sides in one call, since the branch is evaluated for the batch at once.
+def test_branch_separates_a_mixed_batch(branched_bundle):
+    out = classify([IN_BRANCH[0], OUT_OF_BRANCH[0], IN_BRANCH[-1]], branched_bundle)
+
+    assert out.loc[0, "pred_program_cat"] != ""
+    assert out.loc[1, "pred_program_cat"] == ""
+    assert out.loc[2, "pred_program_cat"] != ""
+
+
+# Without the branch the same model answers the same record confidently, which
+# is what makes the branch worth having rather than a redundant safety net.
+def test_the_model_alone_would_have_answered_the_outside_record(branched_bundle):
+    entry = branched_bundle["targets"]["program_cat"]
+    X = build_features(OUT_OF_BRANCH[:1], branched_bundle["tfidf_word"],
+                       branched_bundle["tfidf_char"])
+
+    scores = _score(entry, X, len(entry["id2name"]))
+
+    assert scores.max() > 0.5
+
+
+# A blank description has nothing to read, and that rule outranks the branch.
+def test_blank_text_is_withheld_whatever_the_branch_says(branched_bundle):
+    out = classify(["   "], branched_bundle)
+
+    assert out.loc[0, "pred_program_cat"] == ""
+    assert out.loc[0, "source_program_cat"] == "no description"
+
+
+# A coder's explicit answer outranks the branch: they can see the record.
+def test_an_override_survives_a_branch_that_does_not_apply(branched_bundle):
+    out = classify(
+        OUT_OF_BRANCH[:1], branched_bundle,
+        overrides={"program_cat": ["OHS Health & Safety"]},
+    )
+
+    assert out.loc[0, "pred_program_cat"] == "OHS Health & Safety"
+    assert out.loc[0, "source_program_cat"] == "confirmed by reviewer"
+
+
+# -- language-model fallback -------------------------------------------------
+#
+# The model is consulted only on rows the classifiers flagged for review. The
+# classifiers already match how consistently people code these fields, so a
+# confident row has nothing to gain and 40,000 records a year makes asking
+# about every one of them expensive.
+
+
+# The whole point of the fallback: a flagged row gets a second opinion.
+def test_a_flagged_row_is_offered_to_the_model(bundle):
+    backend = FakeBackend({"missing label": "HAPI Piping — it names a hanger"})
+
+    out = classify(["missing label on valve body"], bundle, backend=backend)
+
+    assert backend.prompts, "a flagged row should have reached the model"
+
+
+# A confident row must not: that is what keeps the batch path affordable.
+def test_a_confident_row_never_reaches_the_model(bundle):
+    backend = FakeBackend()
+
+    out = classify(["cracked weld on pipe hanger"], bundle, backend=backend)
+
+    confident = not out.loc[0, "review_process_cat"]
+    assert confident
+    assert all("Process Cat" not in p for p in backend.prompts)
+
+
+# An answer outside the candidate list leaves the classifier's answer standing.
+def test_an_invalid_suggestion_changes_nothing(bundle):
+    backend = FakeBackend({"missing label": "ZZTOP Invented"})
+
+    baseline = classify(["missing label on valve body"], bundle)
+    out = classify(["missing label on valve body"], bundle, backend=backend)
+
+    assert out.loc[0, "pred_process_cat"] == baseline.loc[0, "pred_process_cat"]
+    assert out.loc[0, "source_process_cat"] == baseline.loc[0, "source_process_cat"]
+
+
+# Without a backend the frame is exactly what it always was — no stray column.
+def test_no_backend_leaves_the_frame_unchanged(bundle):
+    out = classify(["missing label on valve body"], bundle)
+
+    assert not [c for c in out.columns if c.startswith("rationale_")]
+
+
+# A suggestion the model supplies replaces the answer and says where it came
+# from, so a coder is never shown a machine's guess as if a classifier made it.
+# Driven directly rather than through a threshold, so the row under test is
+# flagged by construction and the assertion cannot quietly stop running.
+def test_an_accepted_suggestion_replaces_the_answer_and_is_attributed(bundle):
+    entry = bundle["targets"]["process_cat"]
+    chosen = list(entry["id2name"].values())[0]
+    backend = FakeBackend({"valve body": f"{chosen} — best fit"})
+
+    out = classify(["missing label on valve body"], bundle)
+    out.loc[0, "review_process_cat"] = True
+
+    _consult_llm(out, "process_cat", entry, bundle,
+                 ["missing label on valve body"], backend, {})
+
+    assert out.loc[0, "pred_process_cat"] == chosen
+    assert out.loc[0, "source_process_cat"] == "language model"
+    assert "best fit" in out.loc[0, "rationale_process_cat"]
+
+
+# A child's suggestions are drawn from its parent's own children, so the model
+# cannot produce a pairing the taxonomy does not contain.
+def test_suggestions_for_a_child_are_limited_to_its_parents_children(bundle):
+    entry = bundle["targets"]["process_sub"]
+    backend = FakeBackend()
+
+    out = classify(["cracked weld on pipe hanger"], bundle)
+    out.loc[0, "review_process_sub"] = True
+
+    _consult_llm(out, "process_sub", entry, bundle,
+                 ["cracked weld on pipe hanger"], backend, {})
+
+    offered = backend.prompts[0]
+    assert "HAPI Piping" in offered
+    assert "ELCA Cable" not in offered

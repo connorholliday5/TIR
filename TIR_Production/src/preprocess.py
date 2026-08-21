@@ -13,13 +13,13 @@ import pandas as pd
 from sklearn.model_selection import train_test_split
 
 from src.config import (
-    ALIASES, CONFIG, CONFIG_PATH, HIERARCHY_PATH, PRIMARY_TARGET, PROC_DIR,
-    RAW_DIR, REQUIRED_COLS, ROOT, SEED, TARGETS, TEXT_COLS,
-    label_map_path, validate_target_order,
+    ALIASES, BRANCHES, CONFIG, CONFIG_PATH, HIERARCHY_PATH, PRIMARY_TARGET,
+    PROC_DIR, RAW_DIR, REQUIRED_COLS, ROOT, SEED, TARGETS, TEXT_COLS,
+    branch_label, label_map_path, validate_target_order,
 )
 from src.data import (
-    build_text_series, canonicalize, normalize_categories, resolve_columns,
-    validate_input_dataframe,
+    blank_values, build_text_series, canonicalize, normalize_categories,
+    resolve_columns, validate_input_dataframe,
 )
 # Loads the normalisation table a target refers to, if any.
 def normalization_for(spec: dict) -> dict:
@@ -92,14 +92,7 @@ def prepare_target(df: pd.DataFrame, target: str, spec: dict) -> pd.Series:
     # turned 30,000 blanks into a fabricated OTHER category holding a third of
     # the training rows.  Blanks are identified before normalisation and
     # withheld below, so only genuinely unrecognised values become OTHER.
-    #
-    # Tested with `isna` as well as against the placeholder spellings: pandas 2
-    # renders a missing value as the literal string "nan" under `astype(str)`,
-    # while pandas 3 keeps it missing.  Checking only one of the two silently
-    # does nothing on the other version.
-    blank = original.isna() | raw.fillna("").str.strip().str.lower().isin(
-        ["", "nan", "none", "nat", "<na>"]
-    )
+    blank = blank_values(original)
 
     values = normalize_categories(raw, table, spec.get("unknown_value", "OTHER"))
 
@@ -144,6 +137,27 @@ def prepare_target(df: pd.DataFrame, target: str, spec: dict) -> pd.Series:
     print(f"  ✔ {target}: {len(categories)} categories, {usable:,} usable rows "
           f"({usable / len(df):.1%})")
     return labels
+
+
+# Labels whether each record carries a given family of codes at all.
+def prepare_branch(df: pd.DataFrame, branch: str) -> pd.Series:
+    """Return 1 where `branch` applies to the record and 0 where it does not.
+
+    Read off the branch's anchor column being filled in, which is the only
+    record the exports keep of the decision: a coder who judged Program codes
+    inapplicable left them empty rather than writing that down.  Every row is
+    usable here — an uncoded record is not a missing label for this question,
+    it is the negative answer — which is what separates a branch from an
+    ordinary target.
+    """
+    anchor = BRANCHES[branch]["anchor"]
+    column = TARGETS[anchor]["column"]
+    applies = (~blank_values(cast(pd.Series, df[column]))).astype(int)
+
+    share = applies.mean()
+    print(f"  ✔ {branch}: applies to {int(applies.sum()):,} of {len(df):,} "
+          f"records ({share:.1%}), read from {column}")
+    return applies
 
 
 # Records which child categories were observed under each parent.
@@ -267,8 +281,21 @@ def main() -> None:
     # test.  Matching on the canonical text and labels is what actually catches
     # it: two rows the model reads identically and that carry the same answers
     # cannot teach it anything different.
+    #
+    # Only the label columns *every* file carries can be compared, though.  A
+    # column one export omits is empty on all of its rows, so including it in
+    # the key makes each of those rows differ from its twin in the fuller file
+    # and the duplicate survives.  Adding DST as a target did exactly that:
+    # the sample export has no DST column, and the rows removed here fell from
+    # 12,246 to 3,518 — putting ~8,700 TIRs on both sides of the split.
+    comparable = [c for c in label_columns if all(c in f.columns for f in frames)]
+    dropped_from_key = [c for c in label_columns if c not in comparable]
+    if dropped_from_key:
+        print(f"  ↳ not every file reports {', '.join(dropped_from_key)}; "
+              f"duplicates are judged on the other {len(comparable)} label(s)")
+
     before = len(merged)
-    merged = merged.drop_duplicates(subset=["text", *label_columns], keep="first")
+    merged = merged.drop_duplicates(subset=["text", *comparable], keep="first")
     merged = merged.reset_index(drop=True)
     if len(merged) < before:
         print(f"✔ Removed {before - len(merged):,} duplicate row(s). Remaining: {len(merged):,}")
@@ -277,6 +304,12 @@ def main() -> None:
     print("Preparing targets:")
     for target, spec in TARGETS.items():
         merged[f"label_{target}"] = prepare_target(merged, target, spec)
+
+    # Records, per branch, whether each record carries that family of codes.
+    if BRANCHES:
+        print("Preparing branches:")
+        for branch in BRANCHES:
+            merged[branch_label(branch)] = prepare_branch(merged, branch)
 
     # Saves the cleaned training dataset.
     cleaned_path = PROC_DIR / "cleaned_for_training.csv"

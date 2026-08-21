@@ -16,10 +16,11 @@ import numpy as np
 import pandas as pd
 
 from src.config import (
-    CONFIG, DATA_DIR, MODEL_DIR, PRIMARY_TARGET, TARGETS,
-    review_threshold, target_title,
+    BRANCHES, CONFIG, DATA_DIR, LLM, MODEL_DIR, PRIMARY_TARGET, TARGETS,
+    branch_threshold, branch_title, review_threshold, target_title,
 )
 from src.data import is_blank_text
+from src.llm import CodexBackend, FakeBackend, load_definitions, suggest
 from src.models import (
     build_features, ensemble_score_matrix, expand_proba,
     top_k_from_scores, verify_model_hash,
@@ -94,8 +95,24 @@ def load_bundle(model_dir: Path = MODEL_DIR, data_dir: Path = DATA_DIR) -> dict:
             target: _load_target(target, spec, model_dir, data_dir)
             for target, spec in TARGETS.items()
         },
+        "branches": {
+            branch: _load_branch(branch, model_dir)
+            for branch in BRANCHES
+        },
         "order": list(TARGETS),
     }
+
+
+# Loads the classifier deciding whether one family of codes applies.
+def _load_branch(branch: str, model_dir: Path) -> dict:
+    """Return the models and threshold for one branch."""
+    branch_dir = model_dir / f"branch_{branch}"
+    if not (branch_dir / "svm.pkl").is_file():
+        raise FileNotFoundError(f"models/branch_{branch}/svm.pkl")
+
+    entry = {"threshold": branch_threshold(branch), "title": branch_title(branch)}
+    entry.update(_load_member_models(branch_dir))
+    return entry
 
 
 # Checks every artifact exists before any of them is opened.
@@ -112,6 +129,11 @@ def _require_artifacts(model_dir: Path, data_dir: Path) -> None:
         for target in TARGETS
         if not (data_dir / f"label_map_{target}.json").is_file()
     ]
+    missing += [
+        f"models/branch_{branch}/svm.pkl"
+        for branch in BRANCHES
+        if not (model_dir / f"branch_{branch}" / "svm.pkl").is_file()
+    ]
     if missing:
         raise FileNotFoundError(", ".join(missing))
 
@@ -126,6 +148,7 @@ def _load_target(target: str, spec: dict, model_dir: Path, data_dir: Path) -> di
         "id2name": id2name,
         "name2id": {v: k for k, v in id2name.items()},
         "parent": spec.get("parent"),
+        "branch": spec.get("branch"),
         "top_k": int(spec.get("top_k", 1)),
         "threshold": review_threshold(target),
     }
@@ -270,6 +293,108 @@ def _predict_child(
     return prediction
 
 
+# Decides, per row, whether a family of codes applies to the record at all.
+def _predict_branches(bundle: dict, X) -> Dict[str, np.ndarray]:
+    """Return {branch: bool per row} — True where the branch's codes apply.
+
+    A record below the branch's threshold is treated as not carrying the
+    branch.  That is deliberately the cautious direction: leaving a field for a
+    coder costs a moment, whereas filling in a family of codes the record
+    should not carry is a wrong answer that looks like a confident one.
+    """
+    return {
+        branch: _score(entry, X, 2)[:, 1] >= entry["threshold"]
+        for branch, entry in bundle.get("branches", {}).items()
+    }
+
+
+# Withholds a target on the rows whose branch does not apply.
+def _withhold_branch(
+    out: pd.DataFrame, target: str, applies: np.ndarray, title: str
+) -> None:
+    """Blank `target` wherever its branch was judged not to apply.
+
+    Written after the prediction rather than instead of it so the model still
+    runs once for every row — the branch decides what is shown, and keeping
+    the two separable is what lets the benchmark report the cost of the branch
+    being wrong.
+    """
+    rows = ~applies
+    if not rows.any():
+        return
+
+    out.loc[rows, f"pred_{target}"] = ""
+    out.loc[rows, f"confidence_{target}"] = 0.0
+    out.loc[rows, f"review_{target}"] = False
+    out.loc[rows, f"source_{target}"] = f"no {title.lower()} on this record"
+    if f"alt_{target}" in out.columns:
+        out.loc[rows, f"alt_{target}"] = ""
+
+
+# The codes available to a row, given the parent it was routed into.
+def _candidates_for(
+    bundle: dict, target: str, entry: dict, parent_label: str
+) -> List[str]:
+    """Return the codes a row could legitimately be given.
+
+    For a child target that is its parent's observed children, so a suggestion
+    cannot produce a combination QPS would reject; for a flat target it is the
+    whole taxonomy.
+    """
+    parent = entry["parent"]
+    if not parent:
+        return list(entry["id2name"].values())
+
+    children = bundle.get("hierarchy", {}).get(target, {}).get(parent_label, [])
+    return list(children)
+
+
+# Asks the language model about the rows the classifiers could not code.
+def _consult_llm(
+    out: pd.DataFrame, target: str, entry: dict, bundle: dict,
+    texts: Sequence[str], backend, definitions: Mapping[str, Mapping[str, str]],
+) -> None:
+    """Fill in rows flagged for review, where the model names a valid code.
+
+    Only rows the classifiers were not confident about reach here.  That is the
+    whole design: the classifiers already match how consistently people code
+    these fields, so there is nothing for a language model to win on the rows
+    they are sure of, and asking about them would cost a call each for 40,000
+    records a year.  What is left is the rare tail, where a definition can
+    reach a code that has two examples behind it.
+
+    A row the model declines, or answers outside its candidate list, keeps the
+    classifier's answer and stays flagged.
+    """
+    field = target_title(target)
+    limit = int(LLM.get("max_candidates", 40))
+    parents = out[f"pred_{entry['parent']}"].tolist() if entry["parent"] else [""] * len(texts)
+
+    # Only present when a model was actually consulted, so a run without one
+    # produces exactly the frame it did before.
+    rationale = f"rationale_{target}"
+    if rationale not in out.columns:
+        out[rationale] = ""
+
+    for row in np.flatnonzero(out[f"review_{target}"].to_numpy()):
+        if is_blank_text(texts[row]):
+            continue
+
+        candidates = _candidates_for(bundle, target, entry, parents[row])
+        if not candidates or len(candidates) > limit:
+            continue
+
+        code, reason = suggest(
+            texts[row], field, candidates, backend, definitions.get(target, {})
+        )
+        if not code:
+            continue
+
+        out.loc[row, f"pred_{target}"] = code
+        out.loc[row, f"source_{target}"] = "language model"
+        out.loc[row, rationale] = reason
+
+
 # Writes one target's prediction into the output frame.
 def _write_prediction(
     out: pd.DataFrame, target: str, entry: dict, prediction: _Prediction
@@ -329,6 +454,7 @@ def classify(
     texts: Sequence[str],
     bundle: dict,
     overrides: Optional[Mapping[str, Sequence[str]]] = None,
+    backend=None,
 ) -> pd.DataFrame:
     """Return one row per text with a prediction column set per target.
 
@@ -342,17 +468,28 @@ def classify(
         bundle: The artifacts from `load_bundle`.
         overrides: target -> per-row label to use instead of the prediction.
             An empty string leaves that row to the model.
+        backend: language model consulted for the rows the classifiers flag for
+            review. None uses whatever config.json's `llm` block enables, which
+            is nothing by default.
 
     Returns:
         A frame with pred_/confidence_/review_/source_ per target, plus
-        alt_<target> where the target reports ranked alternatives.
+        alt_<target> where the target reports ranked alternatives, and
+        rationale_<target> where a language model supplied the answer.
     """
     overrides = overrides or {}
     texts = [str(t) for t in texts]
     blank = [is_blank_text(t) for t in texts]
     out = pd.DataFrame(index=range(len(texts)))
 
+    backend = backend if backend is not None else _configured_backend()
+    definitions = load_definitions() if backend is not None else {}
+
     X = build_features(texts, bundle["tfidf_word"], bundle["tfidf_char"])
+
+    # Which families of codes each record carries, decided once for all the
+    # targets belonging to a branch so they cannot disagree with each other.
+    applies = _predict_branches(bundle, X)
 
     for target in bundle["order"]:
         entry = bundle["targets"][target]
@@ -368,10 +505,16 @@ def classify(
                 X,
             )
 
-        # Order matters below: a coder's answer replaces the model's, a row
-        # with nothing to read overrides even that, and the inherited doubt is
-        # applied last so it can see which rows were confirmed.
+        # Order matters below, each rule outranking the one before it: the
+        # branch clears fields the record does not carry, a coder's answer
+        # replaces both the model's and the branch's judgement, a row with
+        # nothing to read overrides even that, and the inherited doubt is
+        # applied last so it can see which rows survived.
         _write_prediction(out, target, entry, prediction)
+
+        branch = entry["branch"]
+        if branch and branch in applies:
+            _withhold_branch(out, target, applies[branch], bundle["branches"][branch]["title"])
 
         supplied = overrides.get(target)
         if supplied is not None:
@@ -382,4 +525,24 @@ def classify(
         if parent is not None:
             _inherit_parent_review(out, target, parent)
 
+        # Last, so it sees the final set of rows still wanting an answer.
+        if backend is not None:
+            _consult_llm(out, target, entry, bundle, texts, backend, definitions)
+
     return out
+
+
+# The language model config.json asks for, if it asks for one.
+def _configured_backend():
+    """Return the backend named by the `llm` block, or None when disabled.
+
+    Off unless switched on, and the real backend additionally refuses to send
+    anything until the coding team has sign-off — two separate switches,
+    because "wire it up" and "send it records" are different decisions.
+    """
+    if not LLM.get("enabled", False):
+        return None
+
+    if LLM.get("backend") == "codex":
+        return CodexBackend()
+    return FakeBackend()

@@ -81,6 +81,29 @@
       "Item Facility/Site",
       "FACILITY_SITE",
       "Location"
+    ],
+    "program_cat": [
+      "Program Cat",
+      "PROGRAM_CATEGORY",
+      "Item Program Category"
+    ],
+    "program_sub": [
+      "Program Sub",
+      "PROGRAM_SUB_CATEGORY",
+      "Item Program Sub-Category"
+    ],
+    "program_l3": [
+      "Program Level3",
+      "PROGRAM_3RD_LEVEL_CATEGORY",
+      "Item Program Category Level 3"
+    ],
+    "dst": [
+      "DST",
+      "DST (Discipline Steering Team)"
+    ],
+    "doc_type": [
+      "Doc Type",
+      "DOCUMENT_TYPE"
     ]
   },
   "text_columns": [
@@ -98,22 +121,64 @@
       "min_class_size": 3,
       "review_threshold": 0.8
     },
+    "metric_sub": {
+      "column": "metric_sub",
+      "parent": "metric_cat",
+      "min_class_size": 10,
+      "review_threshold": 0.6
+    },
+    "metric_l3": {
+      "column": "metric_l3",
+      "parent": "metric_sub",
+      "min_class_size": 10,
+      "top_k": 3,
+      "review_threshold": 0.5
+    },
     "process_cat": {
       "column": "process_cat",
       "normalization": "category_normalization",
       "unknown_value": "OTHER",
       "min_class_size": 3,
-      "review_threshold": 0.69
+      "review_threshold": 0.69,
+      "branch": "process"
     },
     "process_sub": {
       "column": "process_sub",
       "parent": "process_cat",
       "min_class_size": 10,
-      "review_threshold": 0.6
+      "review_threshold": 0.6,
+      "branch": "process"
     },
     "process_l3": {
       "column": "process_l3",
       "parent": "process_sub",
+      "min_class_size": 10,
+      "top_k": 3,
+      "review_threshold": 0.5,
+      "branch": "process"
+    },
+    "dst": {
+      "column": "dst",
+      "min_class_size": 10,
+      "review_threshold": 0.7
+    },
+    "program_cat": {
+      "column": "program_cat",
+      "branch": "program",
+      "min_class_size": 10,
+      "review_threshold": 0.7
+    },
+    "program_sub": {
+      "column": "program_sub",
+      "parent": "program_cat",
+      "branch": "program",
+      "min_class_size": 10,
+      "review_threshold": 0.6
+    },
+    "program_l3": {
+      "column": "program_l3",
+      "parent": "program_sub",
+      "branch": "program",
       "min_class_size": 10,
       "top_k": 3,
       "review_threshold": 0.5
@@ -178,5 +243,25 @@
       "lr"
     ],
     "hierarchical_min_rows": 200
+  },
+  "branches": {
+    "process": {
+      "anchor": "process_cat",
+      "title": "Process codes",
+      "review_threshold": 0.6
+    },
+    "program": {
+      "anchor": "program_cat",
+      "title": "Program codes",
+      "review_threshold": 0.6
+    }
+  },
+  "llm": {
+    "enabled": false,
+    "allow_calls": false,
+    "backend": "fake",
+    "model": "",
+    "max_tokens": 256,
+    "max_candidates": 40
   }
 }
