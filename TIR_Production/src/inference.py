@@ -489,7 +489,12 @@ def classify(
 
     # Which families of codes each record carries, decided once for all the
     # targets belonging to a branch so they cannot disagree with each other.
+    # Written out as its own column: the UI greys a family it does not apply
+    # to rather than showing empty fields, and the benchmark cannot report what
+    # the branch costs when it is wrong unless it can see the decision.
     applies = _predict_branches(bundle, X)
+    for branch, verdict in applies.items():
+        out[f"branch_{branch}"] = verdict
 
     for target in bundle["order"]:
         entry = bundle["targets"][target]

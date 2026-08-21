@@ -20,11 +20,12 @@ import pandas as pd
 from sklearn.metrics import accuracy_score, f1_score
 
 from src.config import (
-    ALIASES, MODEL_DIR, PROC_DIR, REPORT_DIR, ROOT, TARGETS, TEXT_COLS,
-    review_threshold,
+    ALIASES, BRANCHES, MODEL_DIR, PROC_DIR, REPORT_DIR, ROOT, TARGETS,
+    TEXT_COLS, branch_title, review_threshold,
 )
-from src.data import build_text_series, canonicalize, resolve_columns
+from src.data import blank_values, build_text_series, canonicalize, resolve_columns
 from src.inference import classify, load_bundle
+from src.llm import load_definitions
 
 
 # A field is called sufficient when coders agree with each other at least this
@@ -113,6 +114,126 @@ def verdict(agreement: float, classes: int, thin: int) -> str:
     return base
 
 
+# Reports how often each family of codes is carried at all.
+def _branch_section(merged: pd.DataFrame) -> List[str]:
+    """Describe branch coverage, which is what makes the gates necessary."""
+    if not BRANCHES:
+        return []
+
+    lines = [
+        "",
+        "## Which families of codes a record carries",
+        "",
+        "A branch is a family of codes a record either carries or does not. These are not "
+        "fields every record fills in, so each has its own classifier deciding whether it "
+        "applies before any code within it is predicted — without which the in-branch "
+        "models, trained on coded rows alone, would answer every record just as "
+        "confidently.",
+        "",
+        "| Family | Records carrying it | Share |",
+        "| --- | ---: | ---: |",
+    ]
+
+    for branch, spec in BRANCHES.items():
+        column = TARGETS[spec["anchor"]]["column"]
+        if column not in merged.columns:
+            continue
+        applies = ~blank_values(cast(pd.Series, merged[column]))
+        lines.append(
+            f"| {branch_title(branch)} | {int(applies.sum()):,} | {applies.mean():.1%} |"
+        )
+
+    return lines
+
+
+# Reports label coverage split by document type.
+def _document_type_section(merged: pd.DataFrame) -> List[str]:
+    """Show how differently the document types are coded.
+
+    This is the finding the branch design rests on, and it is invisible in the
+    combined figures: Process is largely a TIR field and Program largely a SURV
+    one, so a single coverage percentage understates both.
+    """
+    if "doc_type" not in merged.columns:
+        return []
+
+    types = cast(pd.Series, merged["doc_type"]).astype(str).str.strip()
+    present = [t for t in types.value_counts().head(6).index if t and t.lower() != "nan"]
+    if len(present) < 2:
+        return []
+
+    lines = [
+        "",
+        "## Coverage by document type",
+        "",
+        "The share of records of each type that carry each field. A field coded on one "
+        "document type and not another is a branch, not a gap.",
+        "",
+        "| Field | " + " | ".join(f"{t} (n={int((types == t).sum()):,})" for t in present) + " |",
+        "| --- | " + " | ".join("---:" for _ in present) + " |",
+    ]
+
+    for target, spec in TARGETS.items():
+        column = spec["column"]
+        if column not in merged.columns:
+            continue
+        filled = ~blank_values(cast(pd.Series, merged[column]))
+        shares = [f"{filled[types == t].mean():.1%}" for t in present]
+        lines.append(f"| {target} | " + " | ".join(shares) + " |")
+
+    return lines
+
+
+# Reports how much of the taxonomy the code dictionary describes.
+def _definitions_section(merged: pd.DataFrame) -> List[str]:
+    """State the coverage of config/code_definitions.json.
+
+    The language model's advantage over the classifiers is that it can read
+    what a code means rather than infer it from examples it does not have, so
+    this coverage is what decides whether consulting one is worth doing.
+    """
+    definitions = load_definitions()
+
+    lines = [
+        "",
+        "## Code definitions",
+        "",
+        "What each code means, for the language model consulted on the records the "
+        "classifiers cannot code. The classifiers read none of this. Supplied in "
+        "`config/code_definitions.json`.",
+        "",
+        "| Field | Codes in use | Described | Coverage |",
+        "| --- | ---: | ---: | ---: |",
+    ]
+
+    total_described = 0
+    for target, spec in TARGETS.items():
+        column = spec["column"]
+        if column not in merged.columns:
+            continue
+        in_use = set(
+            cast(pd.Series, merged.loc[~blank_values(cast(pd.Series, merged[column])), column])
+            .astype(str).str.strip().unique()
+        )
+        described = {k for k, v in definitions.get(target, {}).items() if v.strip()}
+        hit = len(in_use & described)
+        total_described += hit
+        share = f"{hit / len(in_use):.0%}" if in_use else "—"
+        lines.append(f"| {target} | {len(in_use):,} | {hit} | {share} |")
+
+    if not total_described:
+        lines += [
+            "",
+            "> **No definitions have been supplied yet.** The model is given the list of "
+            "valid codes, which constrains it to a legal answer, but nothing about what "
+            "those codes mean — which is the part that could reach a code with two "
+            "examples behind it. Ask the coding team for the QPS code dictionary; it is "
+            "the dependency that decides whether the language model is worth its cost.",
+        ]
+
+    return lines
+
+
 # Builds the data-sufficiency report.
 def build_sufficiency(raw_csv: List[str], out: Path) -> None:
     """Answer whether the supplied exports are labelled well enough to train on."""
@@ -153,8 +274,14 @@ def build_sufficiency(raw_csv: List[str], out: Path) -> None:
     # `consistency` for why the full model input is the wrong grain.
     merged["repeat_key"] = build_text_series(merged, ["description_1"])
 
+    # Only the label columns every file reports can be compared — a column one
+    # export omits is blank on all of its rows, so each of them differs from
+    # its twin in the fuller file and the duplicate survives.  Mirrors
+    # preprocessing, which has to draw the line the same way or this report
+    # describes a dataset the models were not trained on.
     label_columns = [
-        spec["column"] for spec in TARGETS.values() if spec["column"] in merged.columns
+        spec["column"] for spec in TARGETS.values()
+        if all(spec["column"] in frame.columns for frame in frames)
     ]
     before = len(merged)
     merged = merged.drop_duplicates(subset=["text", *label_columns], keep="first")
@@ -188,6 +315,9 @@ def build_sufficiency(raw_csv: List[str], out: Path) -> None:
             f"| {target} | {int(filled.sum()):,} | {filled.mean():.1%} | "
             f"{stats[target]['classes']} | {thin} (under {minimum}) |"
         )
+
+    lines += _branch_section(merged)
+    lines += _document_type_section(merged)
 
     lines += [
         "",
@@ -235,24 +365,29 @@ def build_sufficiency(raw_csv: List[str], out: Path) -> None:
             f"{verdict(entry.get('agreement', float('nan')), entry.get('classes', 0), entry.get('thin', 0))} |"
         )
 
+    lines += _definitions_section(merged)
+
     lines += [
         "",
-        "## Why this uses TF-IDF and a linear model, not a language model",
+        "## Where a language model fits",
         "",
-        "Small and large language models are both listed as areas of research for this "
-        "project, and this system uses neither: the text is encoded with word and character "
-        "TF-IDF and classified with a calibrated linear SVM.",
+        "The coding itself is TF-IDF and a calibrated linear SVM: deterministic, auditable, "
+        "installable offline, and already matching how consistently people code these "
+        "fields. Nothing a language model does moves that ceiling, which is set by the "
+        "labels rather than the method.",
         "",
-        "That is a deliberate constraint rather than an oversight. The dependency list is "
-        "explicit that the pipeline needs numpy only — no torch, no downloaded model file — "
-        "which keeps it deterministic, auditable and installable offline, all of which "
-        "matter more here than the last point of accuracy.",
+        "It is consulted as a **fallback**, on the records the classifiers flag for review "
+        "and nowhere else. That is where the argument for one actually holds: the rare tail "
+        "has too few examples for any model to learn from, but a code with two examples "
+        "behind it still has a definition, and reading a definition is the one thing the "
+        "classifiers cannot do. Confident records never reach it, which also keeps the cost "
+        "proportionate to 40,000-odd records a year.",
         "",
-        "What a language model would plausibly add is the rare-category tail, where there "
-        "are too few examples for a bag-of-features model to generalise. What it would cost "
-        "is model provenance and approval to run in this environment. It would **not** lift "
-        "the ceiling above: that is set by how consistently the training labels were "
-        "assigned, and no model can be more consistent than its data.",
+        "Its answer is constrained to the codes valid under the confirmed parent, so it "
+        "cannot produce a combination QPS would reject, and it is switched off by default. "
+        "Sending record text to a model — even one inside the airgap — is a sign-off the "
+        "coding team obtains, and bulk processing may be a separate question from a coder "
+        "consulting it on one TIR.",
     ]
 
     _write(out, lines)
@@ -291,6 +426,66 @@ def threshold_for(confidence: np.ndarray, correct: np.ndarray, target: float):
         if precision >= target:
             return float(threshold), float(keep.mean()), precision
     return None
+
+
+# Reports how well each branch decides whether its codes apply.
+def _branch_accuracy_section(df: pd.DataFrame, preds: pd.DataFrame) -> List[str]:
+    """Score the branch decisions, and say what the field figures are conditional on.
+
+    This section exists because the in-branch figures above are easy to quote
+    wrongly.  They are measured only on records the branch let through, so a
+    Program accuracy of 0.97 means "0.97 on records we judged to carry Program
+    codes" — not on TIRs at large.  What a coder actually experiences is the
+    two multiplied, so both are given.
+    """
+    if not BRANCHES:
+        return []
+
+    lines = [
+        "",
+        "## Whether a family of codes applies at all",
+        "",
+        "Before any code is predicted, each family is judged to apply to the record or "
+        "not. **Wrongly said to apply** is the expensive error: it fills a field that "
+        "should have been empty, with an answer the model is confident about because it "
+        "was never trained on records outside its branch.",
+        "",
+        "| Family | Correct | Wrongly applied | Wrongly withheld | Precision | Recall |",
+        "| --- | ---: | ---: | ---: | ---: | ---: |",
+    ]
+
+    measured = False
+    for branch in BRANCHES:
+        column = f"branch_{branch}"
+        if column not in df.columns or column not in preds.columns:
+            continue
+
+        truth = df[column].to_numpy().astype(bool)
+        guess = preds[column].to_numpy().astype(bool)
+        hit = int((truth & guess).sum())
+        false_apply = int((~truth & guess).sum())
+        false_withhold = int((truth & ~guess).sum())
+        precision = hit / (hit + false_apply) if hit + false_apply else float("nan")
+        recall = hit / (hit + false_withhold) if hit + false_withhold else float("nan")
+
+        lines.append(
+            f"| {branch_title(branch)} | {(truth == guess).mean():.1%} | "
+            f"{false_apply:,} | {false_withhold:,} | "
+            f"{precision:.1%} | {recall:.1%} |"
+        )
+        measured = True
+
+    if not measured:
+        return []
+
+    lines += [
+        "",
+        "> **The accuracy figures above are conditional on this.** Each field is scored "
+        "only on records its family was judged to apply to, so a coder's experience is the "
+        "two multiplied: a family judged right 95% of the time, coded right 90% of the "
+        "time, is right on about 86% of records. Quote the pair, not the field alone.",
+    ]
+    return lines
 
 
 # Builds the benchmark report.
@@ -347,6 +542,11 @@ def build_benchmark(split: str, out: Path) -> None:
         "",
         "> Read each figure against how consistently people code that field — see "
         "`data_sufficiency.md`. A model matching its coders is at the ceiling, not failing.",
+    ]
+
+    lines += _branch_accuracy_section(df, preds)
+
+    lines += [
         "",
         "## Coverage at a precision target",
         "",

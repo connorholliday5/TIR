@@ -50,6 +50,18 @@ def build_frame(rows: Sequence[Dict]) -> pd.DataFrame:
             record[f"{title} confidence"] = round(float(row.get(f"confidence_{target}", 0.0)), 4)
             record[f"{title} review?"] = "Yes" if row.get(f"review_{target}") else ""
 
+        # Where a language model supplied the code it also supplied its
+        # reasoning, and that reasoning is the point of having asked: a coder
+        # checking a suggestion needs to see the argument for it, not just the
+        # code.  Only the fields that actually carry one get a column, since
+        # the model is consulted on few rows and forty empty columns help
+        # nobody.
+        for target in TARGETS:
+            reason = str(row.get(f"rationale_{target}", "") or "").strip()
+            if reason:
+                title = heading(TARGETS[target].get("column", target))
+                record[f"{title} — why"] = reason
+
         record["Source"] = row.get("source", "model")
         record["Classified At"] = row.get("classified_at", "")
         records.append(record)

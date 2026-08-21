@@ -129,6 +129,36 @@ def branch_threshold(branch: str) -> float:
     return float(BRANCHES.get(branch, {}).get("review_threshold", DEFAULT_REVIEW_THRESHOLD))
 
 
+# Groups the targets into the rows the QPS entry screen shows.
+def families() -> List[List[str]]:
+    """Return each chain of targets, deepest-first within the chain.
+
+    QPS presents the codes as a grid — Metric, Process and Program across
+    Category, Sub-Category and 3rd Level — and a coder reading the app should
+    see the screen they already know.  The grid is not configured separately
+    because it is already implied by which target names which parent: a family
+    is a root target and everything descending from it.
+
+    A flat target with no children (DST) comes back as a chain of one.
+    """
+    children: Dict[str, List[str]] = {}
+    roots: List[str] = []
+    for target, spec in TARGETS.items():
+        parent = spec.get("parent")
+        if parent:
+            children.setdefault(parent, []).append(target)
+        else:
+            roots.append(target)
+
+    def chain(target: str) -> List[str]:
+        line = [target]
+        while children.get(line[-1]):
+            line.append(children[line[-1]][0])
+        return line
+
+    return [chain(root) for root in roots]
+
+
 # Checks that a child target is defined after the parent it depends on.
 def validate_target_order() -> None:
     """Raise if a target names a parent or branch that is not defined first.

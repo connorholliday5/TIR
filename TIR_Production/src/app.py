@@ -24,7 +24,7 @@ import streamlit as st
 
 from src.config import (
     FEEDBACK_CFG, FEEDBACK_PATH, PRIMARY_TARGET, REQUIRED_COLS, ROOT,
-    TARGETS, TEXT_COLS, heading, target_title,
+    TARGETS, TEXT_COLS, branch_title, families, heading, target_title,
 )
 from src.data import build_text_series, canonicalize, validate_input_dataframe
 from src.export import DETAIL_FIELDS, filename, to_workbook
@@ -62,29 +62,76 @@ def classify_one(fields: dict, bundle: dict, confirmed_parent: str = "") -> dict
     return classify([text], bundle, overrides).iloc[0].to_dict()
 
 
-# Renders one target's prediction.
-def render_prediction(target: str, result: dict) -> None:
+# Renders the codes as the grid the QPS entry screen shows them in.
+def render_grid(bundle: dict, result: dict) -> None:
+    """Lay the targets out as QPS does: a family per row, a level per column.
+
+    A coder moves between this and the QPS screen all day, so the arrangement
+    is theirs rather than the order the models happen to be trained in.
+
+    A family the record does not carry is shown greyed rather than hidden: an
+    absent Program section reads as a bug, whereas one saying the record has no
+    Program codes is the answer.
+    """
+    columns_shown = max(len(chain) for chain in families())
+    header = st.columns([2] + [3] * columns_shown)
+    header[0].caption("")
+    for index, name in enumerate(("Category", "Sub-Category", "3rd Level")[:columns_shown]):
+        header[index + 1].caption(name)
+
+    for chain in families():
+        branch = TARGETS[chain[0]].get("branch")
+        applies = bool(result.get(f"branch_{branch}", True)) if branch else True
+
+        row = st.columns([2] + [3] * columns_shown)
+        row[0].markdown(f"**{_family_name(chain[0])}**")
+
+        if not applies:
+            row[1].caption(f"_No {branch_title(branch).lower()} on this record._")
+            continue
+
+        for index, target in enumerate(chain):
+            with row[index + 1]:
+                render_cell(target, result)
+
+
+# The name of a family, taken from its root target's heading.
+def _family_name(root: str) -> str:
+    """"Metric Cat" -> "Metric"; a standalone target keeps its own name."""
+    title = target_title(root)
+    for suffix in (" Cat", " Category"):
+        if title.endswith(suffix):
+            return title[: -len(suffix)]
+    return title
+
+
+# Renders one cell of the grid.
+def render_cell(target: str, result: dict) -> None:
+    """Show one code, its confidence, and why it is what it is."""
     label = result.get(f"pred_{target}", "")
     confidence = float(result.get(f"confidence_{target}", 0.0))
     source = result.get(f"source_{target}", "model")
 
-    left, right = st.columns([3, 1])
-    left.markdown(f"**{target_title(target)}**")
-    left.write(label or "—")
-    right.metric("Confidence", f"{confidence:.0%}", label_visibility="collapsed")
+    st.write(label or "—")
+    if label:
+        st.caption(f"{confidence:.0%} confident")
 
     alternates = result.get(f"alt_{target}")
     if alternates:
-        st.caption(f"Other likely codes: {alternates}")
+        st.caption(f"Also: {alternates}")
 
-    if source == "no parent":
-        st.caption("Not predicted — the level above it has no answer.")
+    rationale = result.get(f"rationale_{target}", "")
+    if source == "language model" and rationale:
+        with st.expander("Why this code"):
+            st.write(rationale)
+    elif source == "no parent":
+        st.caption("The level above has no answer.")
     elif source == "no model for parent":
-        st.caption("Too few examples under this parent to model; showing its most common code.")
+        st.caption("Too few examples here; showing the most common code.")
     elif source == "confirmed by reviewer":
         st.caption("Confirmed by you.")
     elif result.get(f"review_{target}"):
-        st.caption("⚠ Below the review threshold — worth a second look.")
+        st.caption("⚠ Worth a second look.")
 
 
 # Renders the single-TIR tab.
@@ -160,10 +207,7 @@ def render_single(bundle: dict) -> None:
         st.rerun()
 
     st.divider()
-    for target in bundle["order"]:
-        if target == ROOT_TARGET:
-            continue
-        render_prediction(target, result)
+    render_grid(bundle, result)
 
     st.divider()
     if st.button("Add to session export", type="secondary"):
